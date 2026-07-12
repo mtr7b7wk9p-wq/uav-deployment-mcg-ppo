@@ -14,7 +14,7 @@ from envs.geometry import (
     sample_points_in_annulus,
     set_random_seed,
 )
-from envs.task_model import TaskStateBatch
+from envs.task_model import LocalBeliefBatch, TaskTruthBatch
 
 
 class ResourceCognitionEnv:
@@ -35,7 +35,8 @@ class ResourceCognitionEnv:
         self.active_mask = np.ones((self.num_agents,), dtype=bool)
         self.remaining_time = np.zeros((self.num_agents,), dtype=np.float32)
         self.total_distance_per_uav = np.zeros((self.num_agents,), dtype=np.float32)
-        self.tasks: Optional[TaskStateBatch] = None
+        self.task_truth: Optional[TaskTruthBatch] = None
+        self.local_beliefs: Optional[LocalBeliefBatch] = None
         self._slot_task_indices: List[np.ndarray] = []
         self._last_info: Dict[str, Any] = {}
 
@@ -45,6 +46,7 @@ class ResourceCognitionEnv:
         self.current_step = 0
         self.no_improve_steps = 0
         self._init_uavs()
+
         positions = sample_points_in_annulus(
             num_points=self.cfg.num_cognition_tasks,
             r_inner=self.cfg.r_safe,
@@ -65,11 +67,15 @@ class ResourceCognitionEnv:
             self.cfg.task_priority_max,
             size=self.cfg.num_cognition_tasks,
         ).astype(np.float32)
-        self.tasks = TaskStateBatch(
-            positions,
-            band_ids,
-            true_states,
-            priorities,
+        self.task_truth = TaskTruthBatch(
+            positions_xy=positions,
+            band_ids=band_ids,
+            true_states=true_states,
+            priorities=priorities,
+        )
+        self.local_beliefs = LocalBeliefBatch(
+            num_agents=self.num_agents,
+            task_priorities=priorities,
             initial_uncertainty=self.cfg.task_initial_uncertainty,
             initial_aoi=self.cfg.task_initial_aoi,
             max_aoi=self.cfg.task_max_aoi,
@@ -81,54 +87,56 @@ class ResourceCognitionEnv:
             uncertainty_gain=0.0,
             aoi_gain=0.0,
             repeat_ratio=0.0,
+            move_distances=np.zeros((self.num_agents,), dtype=np.float32),
             termination_reason="running",
         )
         return self._build_output()
 
-    def step(self, actions: List[int] | np.ndarray) -> Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
-        if self.tasks is None:
-            raise RuntimeError("Call reset before step.")
+    def step(
+        self,
+        actions: List[int] | np.ndarray,
+    ) -> Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
+        truth, beliefs = self._require_state()
         action_array = np.asarray(actions, dtype=np.int64)
         if action_array.shape != (self.num_agents,):
             raise ValueError(f"actions must have shape ({self.num_agents},).")
         if np.any(action_array < 0) or np.any(action_array >= self.action_size):
             raise ValueError("action out of range.")
 
-        selected_tasks = [
-            int(self._slot_task_indices[i][int(action) - self.MOVE_ACTIONS])
-            for i, action in enumerate(action_array)
-            if int(action) >= self.MOVE_ACTIONS
-            and int(action) - self.MOVE_ACTIONS < len(self._slot_task_indices[i])
-        ]
-        unique_tasks, counts = np.unique(selected_tasks, return_counts=True) if selected_tasks else (
-            np.zeros((0,), dtype=np.int64), np.zeros((0,), dtype=np.int64)
-        )
-        repeat_count = int(np.sum(np.maximum(counts - 1, 0)))
+        sensing_agents, sensing_tasks = self._decode_sensing_actions(action_array)
+        if sensing_tasks.size:
+            _, task_counts = np.unique(sensing_tasks, return_counts=True)
+            repeat_count = int(np.sum(np.maximum(task_counts - 1, 0)))
+        else:
+            repeat_count = 0
 
         self.current_step += 1
-        self.tasks.age(self.cfg.cognition_aoi_increment)
         move_distances = self._apply_movement(action_array)
-        if unique_tasks.size:
+        beliefs.age(self.cfg.cognition_aoi_increment)
+
+        if sensing_tasks.size:
             noise = self.rng.normal(
                 0.0,
                 self.cfg.cognition_observation_noise_std,
-                size=unique_tasks.shape,
+                size=sensing_tasks.shape,
             ).astype(np.float32)
-            observations = self.tasks.true_states[unique_tasks] + noise
+            observations = truth.true_states[sensing_tasks] + noise
         else:
-            observations = None
-        sensing_gain = self.tasks.sense(
-            unique_tasks,
+            observations = np.zeros((0,), dtype=np.float32)
+        sensing_gain = beliefs.apply_local_sensing(
+            sensing_agents,
+            sensing_tasks,
+            observations,
             uncertainty_reduction=self.cfg.cognition_task_uncertainty_reduction,
-            noisy_observations=observations,
+            current_step=self.current_step,
         )
 
-        repeat_ratio = float(repeat_count / max(len(self.tasks), 1))
+        repeat_ratio = float(repeat_count / max(len(truth), 1))
         active_count = max(int(np.sum(self.active_mask)), 1)
         movement_cost = float(
             np.sum(move_distances) / max(active_count * self.cfg.step_size(), 1e-6)
         )
-        sensing_cost = self.cfg.cognition_sensing_cost * float(unique_tasks.size)
+        sensing_cost = self.cfg.cognition_sensing_cost * float(sensing_tasks.size)
         repeat_penalty = self.cfg.cognition_repeat_penalty * repeat_ratio
         reward = float(
             self.cfg.reward_weight_uncertainty_gain * sensing_gain["uncertainty_gain"]
@@ -145,11 +153,13 @@ class ResourceCognitionEnv:
             uncertainty_gain=sensing_gain["uncertainty_gain"],
             aoi_gain=sensing_gain["aoi_gain"],
             repeat_ratio=repeat_ratio,
+            move_distances=move_distances,
             termination_reason=reason,
         )
         info.update(
             {
-                "selected_task_count": int(unique_tasks.size),
+                "sensing_action_count": int(sensing_tasks.size),
+                "selected_task_count": int(np.unique(sensing_tasks).size),
                 "repeat_task_count": repeat_count,
                 "movement_cost": movement_cost,
                 "sensing_cost": float(sensing_cost),
@@ -160,13 +170,12 @@ class ResourceCognitionEnv:
         return self._build_output(), reward, done, info
 
     def get_local_obs(self, agent_id: int) -> np.ndarray:
-        if self.tasks is None:
-            raise RuntimeError("Call reset before get_local_obs.")
+        truth, beliefs = self._require_state()
         if not 0 <= int(agent_id) < self.num_agents:
             raise ValueError("agent_id out of range.")
         i = int(agent_id)
         position = self.uav_positions[i, :2]
-        distances = np.linalg.norm(self.tasks.positions_xy - position[None, :], axis=1)
+        distances = np.linalg.norm(truth.positions_xy - position[None, :], axis=1)
         visible = np.where(distances <= self.cfg.obs_radius)[0]
         visible = visible[np.argsort(distances[visible])][: self.cfg.cognition_max_task_slots]
         self._slot_task_indices[i] = visible.astype(np.int64)
@@ -178,55 +187,80 @@ class ResourceCognitionEnv:
                 self.uav_positions[i, 2] / self.cfg.uav_h_max,
                 self.remaining_time[i] / max(self.cfg.uav_max_time, 1e-6),
                 self.current_step / max(self.cfg.max_steps, 1),
-                self.tasks.cognitive_quality(),
+                beliefs.local_quality(i),
             ],
             dtype=np.float32,
         )
-        task_features = np.zeros((self.cfg.cognition_max_task_slots, 7), dtype=np.float32)
-        for slot, task_idx in enumerate(visible):
-            rel = self.tasks.positions_xy[task_idx] - position
+        task_features = np.zeros((self.cfg.cognition_max_task_slots, 8), dtype=np.float32)
+        for slot, task_id in enumerate(visible):
+            rel = truth.positions_xy[task_id] - position
             task_features[slot] = np.array(
                 [
                     rel[0] / self.cfg.obs_radius,
                     rel[1] / self.cfg.obs_radius,
-                    self.tasks.band_ids[task_idx] / max(self.cfg.cognition_num_bands - 1, 1),
-                    self.tasks.uncertainty[task_idx],
-                    self.tasks.aoi[task_idx] / max(self.cfg.task_max_aoi, 1e-6),
-                    self.tasks.priorities[task_idx] / max(self.cfg.task_priority_max, 1e-6),
-                    self.tasks.confidence[task_idx],
+                    truth.band_ids[task_id] / max(self.cfg.cognition_num_bands - 1, 1),
+                    beliefs.estimates[i, task_id],
+                    beliefs.uncertainties[i, task_id],
+                    beliefs.aoi[i, task_id] / max(self.cfg.task_max_aoi, 1e-6),
+                    truth.priorities[task_id] / max(self.cfg.task_priority_max, 1e-6),
+                    beliefs.confidence[i, task_id],
                 ],
                 dtype=np.float32,
             )
+
         neighbor_features = np.zeros((self.cfg.max_obs_uavs, 4), dtype=np.float32)
-        neighbor_ids = [j for j in range(self.num_agents) if j != i]
-        neighbor_ids.sort(key=lambda j: float(np.linalg.norm(self.uav_positions[j, :2] - position)))
+        neighbor_distances = {
+            j: float(np.linalg.norm(self.uav_positions[j, :2] - position))
+            for j in range(self.num_agents)
+            if j != i
+        }
+        neighbor_ids = sorted(
+            (j for j, distance in neighbor_distances.items() if distance <= self.cfg.obs_radius),
+            key=neighbor_distances.get,
+        )
         for slot, j in enumerate(neighbor_ids[: self.cfg.max_obs_uavs]):
             rel = self.uav_positions[j, :2] - position
             neighbor_features[slot] = [
                 rel[0] / self.cfg.obs_radius,
                 rel[1] / self.cfg.obs_radius,
-                self.remaining_time[j] / max(self.cfg.uav_max_time, 1e-6),
-                1.0 if self.active_mask[j] else 0.0,
+                neighbor_distances[j] / self.cfg.obs_radius,
+                1.0,
             ]
-        return np.concatenate([self_features, task_features.flatten(), neighbor_features.flatten()])
+        return np.concatenate(
+            [self_features, task_features.flatten(), neighbor_features.flatten()]
+        ).astype(np.float32)
 
     def get_global_state(self) -> np.ndarray:
-        if self.tasks is None:
-            raise RuntimeError("Call reset before get_global_state.")
+        """Centralized training/debug state; never used as a local observation."""
+        truth, beliefs = self._require_state()
         return np.concatenate(
             [
-                self.tasks.positions_xy.flatten(),
-                self.tasks.band_ids.astype(np.float32),
-                self.tasks.true_states,
-                self.tasks.estimate,
-                self.tasks.uncertainty,
-                self.tasks.aoi / max(self.cfg.task_max_aoi, 1e-6),
-                self.tasks.priorities,
+                truth.positions_xy.flatten(),
+                truth.band_ids.astype(np.float32),
+                truth.true_states,
+                truth.priorities,
+                beliefs.estimates.flatten(),
+                beliefs.uncertainties.flatten(),
+                (beliefs.aoi / max(self.cfg.task_max_aoi, 1e-6)).flatten(),
+                beliefs.confidence.flatten(),
                 self.uav_positions.flatten(),
                 self.remaining_time / max(self.cfg.uav_max_time, 1e-6),
-                np.array([self.current_step / max(self.cfg.max_steps, 1)], dtype=np.float32),
+                np.array(
+                    [self.current_step / max(self.cfg.max_steps, 1)], dtype=np.float32
+                ),
             ]
         ).astype(np.float32)
+
+    def _decode_sensing_actions(self, actions: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        agent_ids: List[int] = []
+        task_ids: List[int] = []
+        for agent_id, action in enumerate(actions):
+            slot = int(action) - self.MOVE_ACTIONS
+            if slot < 0 or slot >= len(self._slot_task_indices[agent_id]):
+                continue
+            agent_ids.append(agent_id)
+            task_ids.append(int(self._slot_task_indices[agent_id][slot]))
+        return np.asarray(agent_ids, dtype=np.int64), np.asarray(task_ids, dtype=np.int64)
 
     def _init_uavs(self) -> None:
         if self.cfg.uav_init_mode == "circle":
@@ -240,23 +274,43 @@ class ResourceCognitionEnv:
         else:
             raise ValueError(f"Unsupported uav_init_mode: {self.cfg.uav_init_mode}")
         self.uav_positions = np.concatenate(
-            [xy.astype(np.float32), np.full((self.num_agents, 1), self.cfg.uav_init_height, dtype=np.float32)],
+            [
+                xy.astype(np.float32),
+                np.full(
+                    (self.num_agents, 1),
+                    self.cfg.uav_init_height,
+                    dtype=np.float32,
+                ),
+            ],
             axis=1,
         )
         self.active_mask[:] = True
         self.remaining_time[:] = self.cfg.uav_max_time
-        self._slot_task_indices = [np.zeros((0,), dtype=np.int64) for _ in range(self.num_agents)]
+        self._slot_task_indices = [
+            np.zeros((0,), dtype=np.int64) for _ in range(self.num_agents)
+        ]
 
     def _apply_movement(self, actions: np.ndarray) -> np.ndarray:
         distances = np.zeros((self.num_agents,), dtype=np.float32)
         deltas = self.cfg.action_to_delta_xy()
         for i, action in enumerate(actions):
-            if int(action) >= self.MOVE_ACTIONS or not self.active_mask[i] or self.remaining_time[i] <= 0.0:
+            if (
+                int(action) >= self.MOVE_ACTIONS
+                or not self.active_mask[i]
+                or self.remaining_time[i] <= 0.0
+            ):
                 continue
             dx, dy = deltas[int(action)]
             old = self.uav_positions[i, :2].copy()
-            x, y = clip_point_to_ring(float(old[0] + dx), float(old[1] + dy), self.cfg.r_safe, self.cfg.r_disaster)
-            distance = float(np.linalg.norm(np.array([x, y], dtype=np.float32) - old))
+            x, y = clip_point_to_ring(
+                float(old[0] + dx),
+                float(old[1] + dy),
+                self.cfg.r_safe,
+                self.cfg.r_disaster,
+            )
+            distance = float(
+                np.linalg.norm(np.array([x, y], dtype=np.float32) - old)
+            )
             self.uav_positions[i, :2] = [x, y]
             self.total_distance_per_uav[i] += distance
             self.remaining_time[i] = max(self.remaining_time[i] - self.cfg.dt, 0.0)
@@ -264,9 +318,10 @@ class ResourceCognitionEnv:
         return distances
 
     def _check_done(self) -> Tuple[bool, str]:
+        _, beliefs = self._require_state()
         if self.current_step >= self.cfg.max_steps:
             return True, "max_steps"
-        if self.tasks is not None and float(np.average(self.tasks.uncertainty, weights=self.tasks.priorities)) <= self.cfg.trusted_sensing_uncertainty_target:
+        if beliefs.mean_uncertainty() <= self.cfg.trusted_sensing_uncertainty_target:
             return True, "uncertainty_target"
         if not np.any(self.remaining_time > 0.0):
             return True, "energy_timeout"
@@ -275,7 +330,9 @@ class ResourceCognitionEnv:
         return False, "running"
 
     def _build_output(self) -> Dict[str, Any]:
-        local_obs = np.stack([self.get_local_obs(i) for i in range(self.num_agents)], axis=0)
+        local_obs = np.stack(
+            [self.get_local_obs(i) for i in range(self.num_agents)], axis=0
+        )
         return {
             "global_state": self.get_global_state(),
             "local_obs": local_obs.astype(np.float32),
@@ -295,12 +352,14 @@ class ResourceCognitionEnv:
         uncertainty_gain: float,
         aoi_gain: float,
         repeat_ratio: float,
+        move_distances: np.ndarray,
         termination_reason: str,
     ) -> Dict[str, Any]:
-        if self.tasks is None:
-            raise RuntimeError("Task state is not initialized.")
-        weighted_uncertainty = float(np.average(self.tasks.uncertainty, weights=self.tasks.priorities))
-        weighted_aoi = float(np.average(self.tasks.aoi, weights=self.tasks.priorities))
+        truth, beliefs = self._require_state()
+        per_agent_quality = np.array(
+            [beliefs.local_quality(i) for i in range(self.num_agents)],
+            dtype=np.float32,
+        )
         return {
             "reward_total": float(reward),
             "uncertainty_gain": float(uncertainty_gain),
@@ -308,13 +367,23 @@ class ResourceCognitionEnv:
             "reward_uncertainty_gain": float(uncertainty_gain),
             "reward_aoi_gain": float(aoi_gain),
             "repeat_sensing_ratio": float(repeat_ratio),
-            "mean_task_uncertainty": weighted_uncertainty,
-            "mean_task_aoi": weighted_aoi,
-            "cognitive_quality": self.tasks.cognitive_quality(),
+            "mean_task_uncertainty": beliefs.mean_uncertainty(),
+            "mean_task_aoi": beliefs.mean_aoi(),
+            "cognitive_quality": beliefs.mean_quality(),
+            "per_agent_cognitive_quality": per_agent_quality,
+            "mean_estimation_error": beliefs.mean_estimation_error(truth.true_states),
+            "move_distance_total_step": float(np.sum(move_distances)),
+            "total_distance_per_uav": self.total_distance_per_uav.copy(),
+            "remaining_time": self.remaining_time.copy(),
             "active_uav_count": int(np.sum(self.active_mask)),
             "step": int(self.current_step),
             "termination_reason": termination_reason,
         }
 
     def _compute_local_obs_dim(self) -> int:
-        return int(6 + self.cfg.cognition_max_task_slots * 7 + self.cfg.max_obs_uavs * 4)
+        return int(6 + self.cfg.cognition_max_task_slots * 8 + self.cfg.max_obs_uavs * 4)
+
+    def _require_state(self) -> Tuple[TaskTruthBatch, LocalBeliefBatch]:
+        if self.task_truth is None or self.local_beliefs is None:
+            raise RuntimeError("Call reset before accessing task state.")
+        return self.task_truth, self.local_beliefs

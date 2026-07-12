@@ -1,29 +1,36 @@
-"""State model for local, time-sensitive resource cognition."""
+"""Truth and per-UAV belief models for resource cognition."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Iterable
 
 import numpy as np
 
 
 @dataclass(frozen=True)
-class TaskState:
-    """Static task metadata and the current cognitive state."""
+class TaskTruth:
+    """Environment-only task state that must not enter local observations."""
 
     position_xy: tuple[float, float]
     band_id: int
     true_state: float
+    priority: float
+
+
+@dataclass(frozen=True)
+class LocalTaskBelief:
+    """One UAV's current belief about one task."""
+
     estimate: float
     uncertainty: float
     aoi: float
-    priority: float
     confidence: float
+    last_update_step: int
 
 
-class TaskStateBatch:
-    """Vectorized task state with bounded aging and sensing updates."""
+class TaskTruthBatch:
+    """Vectorized hidden task truth owned by the environment."""
 
     def __init__(
         self,
@@ -31,111 +38,183 @@ class TaskStateBatch:
         band_ids: np.ndarray,
         true_states: np.ndarray,
         priorities: np.ndarray,
-        *,
-        initial_uncertainty: float = 1.0,
-        initial_aoi: float = 0.0,
-        max_aoi: float = 40.0,
     ) -> None:
         positions = np.asarray(positions_xy, dtype=np.float32)
         bands = np.asarray(band_ids, dtype=np.int32)
         truth = np.asarray(true_states, dtype=np.float32)
         priority = np.asarray(priorities, dtype=np.float32)
-        n = positions.shape[0]
         if positions.ndim != 2 or positions.shape[1] != 2:
             raise ValueError("positions_xy must have shape [N, 2].")
-        if any(array.shape != (n,) for array in (bands, truth, priority)):
-            raise ValueError("Task arrays must have the same length.")
-        if max_aoi <= 0.0:
-            raise ValueError("max_aoi must be positive.")
+        num_tasks = positions.shape[0]
+        if any(array.shape != (num_tasks,) for array in (bands, truth, priority)):
+            raise ValueError("Task truth arrays must have the same length.")
+        if num_tasks <= 0:
+            raise ValueError("At least one task is required.")
 
         self.positions_xy = positions.copy()
         self.band_ids = bands.copy()
         self.true_states = np.clip(truth, 0.0, 1.0)
         self.priorities = np.maximum(priority, 0.0)
-        self.max_aoi = float(max_aoi)
-        self.initial_uncertainty = float(np.clip(initial_uncertainty, 0.0, 1.0))
-        self.initial_aoi = float(np.clip(initial_aoi, 0.0, self.max_aoi))
-        self.estimate = np.zeros((n,), dtype=np.float32)
-        self.uncertainty = np.zeros((n,), dtype=np.float32)
-        self.aoi = np.zeros((n,), dtype=np.float32)
-        self.confidence = np.zeros((n,), dtype=np.float32)
-        self.reset()
 
     def __len__(self) -> int:
         return int(self.positions_xy.shape[0])
 
+    def snapshot(self, task_id: int) -> TaskTruth:
+        task_id = self._validate_task_id(task_id)
+        return TaskTruth(
+            position_xy=(
+                float(self.positions_xy[task_id, 0]),
+                float(self.positions_xy[task_id, 1]),
+            ),
+            band_id=int(self.band_ids[task_id]),
+            true_state=float(self.true_states[task_id]),
+            priority=float(self.priorities[task_id]),
+        )
+
+    def _validate_task_id(self, task_id: int) -> int:
+        task_id = int(task_id)
+        if not 0 <= task_id < len(self):
+            raise IndexError("task_id out of range.")
+        return task_id
+
+
+class LocalBeliefBatch:
+    """Independent cognitive state for every UAV-task pair."""
+
+    def __init__(
+        self,
+        num_agents: int,
+        task_priorities: np.ndarray,
+        *,
+        initial_uncertainty: float = 1.0,
+        initial_aoi: float = 0.0,
+        max_aoi: float = 40.0,
+    ) -> None:
+        priorities = np.asarray(task_priorities, dtype=np.float32)
+        if num_agents <= 0:
+            raise ValueError("num_agents must be positive.")
+        if priorities.ndim != 1 or priorities.size == 0:
+            raise ValueError("task_priorities must be a non-empty vector.")
+        if max_aoi <= 0.0:
+            raise ValueError("max_aoi must be positive.")
+
+        self.num_agents = int(num_agents)
+        self.num_tasks = int(priorities.size)
+        self.task_priorities = np.maximum(priorities, 0.0)
+        self.max_aoi = float(max_aoi)
+        self.initial_uncertainty = float(np.clip(initial_uncertainty, 0.0, 1.0))
+        self.initial_aoi = float(np.clip(initial_aoi, 0.0, self.max_aoi))
+
+        shape = (self.num_agents, self.num_tasks)
+        self.estimates = np.full(shape, 0.5, dtype=np.float32)
+        self.uncertainties = np.full(shape, self.initial_uncertainty, dtype=np.float32)
+        self.aoi = np.full(shape, self.initial_aoi, dtype=np.float32)
+        self.confidence = np.full(shape, 1.0 - self.initial_uncertainty, dtype=np.float32)
+        self.last_update_step = np.full(shape, -1, dtype=np.int32)
+
     def reset(self) -> None:
-        self.estimate[:] = 0.5
-        self.uncertainty[:] = self.initial_uncertainty
+        self.estimates[:] = 0.5
+        self.uncertainties[:] = self.initial_uncertainty
         self.aoi[:] = self.initial_aoi
-        self.confidence[:] = 1.0 - self.uncertainty
+        self.confidence[:] = 1.0 - self.initial_uncertainty
+        self.last_update_step[:] = -1
 
     def age(self, steps: float = 1.0) -> None:
-        """Increase information age without changing the hidden truth."""
+        """Age every UAV's local information independently."""
         if steps < 0.0:
             raise ValueError("steps must be non-negative.")
         self.aoi[:] = np.minimum(self.aoi + float(steps), self.max_aoi)
 
-    def sense(
+    def apply_local_sensing(
         self,
-        task_indices: Iterable[int],
+        agent_ids: Iterable[int],
+        task_ids: Iterable[int],
+        observations: np.ndarray,
         *,
         uncertainty_reduction: float,
-        noisy_observations: Optional[np.ndarray] = None,
+        current_step: int,
     ) -> dict[str, float]:
-        """Update selected tasks and return weighted cognitive gains."""
-        indices = np.asarray(list(task_indices), dtype=np.int64)
-        if indices.size == 0:
+        """Update only the selected UAV-task belief entries."""
+        agents = np.asarray(list(agent_ids), dtype=np.int64)
+        tasks = np.asarray(list(task_ids), dtype=np.int64)
+        values = np.asarray(observations, dtype=np.float32)
+        if agents.size == 0:
             return {"uncertainty_gain": 0.0, "aoi_gain": 0.0}
-        if np.any(indices < 0) or np.any(indices >= len(self)):
-            raise IndexError("task index out of range.")
+        if agents.shape != tasks.shape or agents.shape != values.shape:
+            raise ValueError("agent_ids, task_ids, and observations must have matching shapes.")
+        if np.any(agents < 0) or np.any(agents >= self.num_agents):
+            raise IndexError("agent_id out of range.")
+        if np.any(tasks < 0) or np.any(tasks >= self.num_tasks):
+            raise IndexError("task_id out of range.")
+
+        before_uncertainty = self.uncertainties[agents, tasks].copy()
+        before_aoi = self.aoi[agents, tasks].copy()
         reduction = float(np.clip(uncertainty_reduction, 0.0, 1.0))
-        unique_indices = np.unique(indices)
-        before_uncertainty = self.uncertainty[unique_indices].copy()
-        before_aoi = self.aoi[unique_indices].copy()
 
-        if noisy_observations is None:
-            observations = self.true_states[unique_indices]
-        else:
-            observations = np.asarray(noisy_observations, dtype=np.float32)
-            if observations.shape != unique_indices.shape:
-                raise ValueError("noisy_observations must match unique task indices.")
-        self.estimate[unique_indices] = np.clip(observations, 0.0, 1.0)
-        self.uncertainty[unique_indices] = np.maximum(
-            before_uncertainty * (1.0 - reduction), 0.0
-        )
-        self.aoi[unique_indices] = 0.0
-        self.confidence[unique_indices] = 1.0 - self.uncertainty[unique_indices]
+        self.estimates[agents, tasks] = np.clip(values, 0.0, 1.0)
+        self.uncertainties[agents, tasks] = before_uncertainty * (1.0 - reduction)
+        self.aoi[agents, tasks] = 0.0
+        self.confidence[agents, tasks] = 1.0 - self.uncertainties[agents, tasks]
+        self.last_update_step[agents, tasks] = int(current_step)
 
-        weight_sum = max(float(np.sum(self.priorities[unique_indices])), 1e-6)
+        weights = self.task_priorities[tasks]
+        weight_sum = max(float(np.sum(weights)), 1e-6)
         uncertainty_gain = float(
-            np.sum(self.priorities[unique_indices] * (before_uncertainty - self.uncertainty[unique_indices]))
+            np.sum(weights * (before_uncertainty - self.uncertainties[agents, tasks]))
             / weight_sum
         )
         aoi_gain = float(
-            np.sum(self.priorities[unique_indices] * before_aoi)
-            / (weight_sum * self.max_aoi)
+            np.sum(weights * before_aoi) / (weight_sum * self.max_aoi)
         )
         return {"uncertainty_gain": uncertainty_gain, "aoi_gain": aoi_gain}
 
-    def cognitive_quality(self) -> float:
-        """Return a priority-weighted quality score in [0, 1]."""
-        weight_sum = max(float(np.sum(self.priorities)), 1e-6)
-        normalized_aoi = self.aoi / self.max_aoi
-        quality = 1.0 - 0.5 * (self.uncertainty + normalized_aoi)
-        return float(np.clip(np.sum(self.priorities * quality) / weight_sum, 0.0, 1.0))
-
-    def snapshot(self, index: int) -> TaskState:
-        if not 0 <= int(index) < len(self):
-            raise IndexError("task index out of range.")
-        i = int(index)
-        return TaskState(
-            position_xy=(float(self.positions_xy[i, 0]), float(self.positions_xy[i, 1])),
-            band_id=int(self.band_ids[i]),
-            true_state=float(self.true_states[i]),
-            estimate=float(self.estimate[i]),
-            uncertainty=float(self.uncertainty[i]),
-            aoi=float(self.aoi[i]),
-            priority=float(self.priorities[i]),
-            confidence=float(self.confidence[i]),
+    def local_quality(self, agent_id: int) -> float:
+        agent_id = self._validate_agent_id(agent_id)
+        weights_sum = max(float(np.sum(self.task_priorities)), 1e-6)
+        normalized_aoi = self.aoi[agent_id] / self.max_aoi
+        quality = 1.0 - 0.5 * (self.uncertainties[agent_id] + normalized_aoi)
+        return float(
+            np.clip(np.sum(self.task_priorities * quality) / weights_sum, 0.0, 1.0)
         )
+
+    def mean_quality(self) -> float:
+        return float(np.mean([self.local_quality(i) for i in range(self.num_agents)]))
+
+    def mean_uncertainty(self) -> float:
+        weights = np.broadcast_to(self.task_priorities, self.uncertainties.shape)
+        return float(np.sum(weights * self.uncertainties) / max(float(np.sum(weights)), 1e-6))
+
+    def mean_aoi(self) -> float:
+        weights = np.broadcast_to(self.task_priorities, self.aoi.shape)
+        return float(np.sum(weights * self.aoi) / max(float(np.sum(weights)), 1e-6))
+
+    def mean_estimation_error(self, true_states: np.ndarray) -> float:
+        truth = np.asarray(true_states, dtype=np.float32)
+        if truth.shape != (self.num_tasks,):
+            raise ValueError("true_states must have shape [num_tasks].")
+        errors = np.abs(self.estimates - truth[None, :])
+        weights = np.broadcast_to(self.task_priorities, errors.shape)
+        return float(np.sum(weights * errors) / max(float(np.sum(weights)), 1e-6))
+
+    def snapshot(self, agent_id: int, task_id: int) -> LocalTaskBelief:
+        agent_id = self._validate_agent_id(agent_id)
+        task_id = self._validate_task_id(task_id)
+        return LocalTaskBelief(
+            estimate=float(self.estimates[agent_id, task_id]),
+            uncertainty=float(self.uncertainties[agent_id, task_id]),
+            aoi=float(self.aoi[agent_id, task_id]),
+            confidence=float(self.confidence[agent_id, task_id]),
+            last_update_step=int(self.last_update_step[agent_id, task_id]),
+        )
+
+    def _validate_agent_id(self, agent_id: int) -> int:
+        agent_id = int(agent_id)
+        if not 0 <= agent_id < self.num_agents:
+            raise IndexError("agent_id out of range.")
+        return agent_id
+
+    def _validate_task_id(self, task_id: int) -> int:
+        task_id = int(task_id)
+        if not 0 <= task_id < self.num_tasks:
+            raise IndexError("task_id out of range.")
+        return task_id

@@ -41,6 +41,7 @@ class EpisodeMetrics:
     task_uncertainty: List[float] = field(default_factory=list)
     task_aoi: List[float] = field(default_factory=list)
     cognitive_quality: List[float] = field(default_factory=list)
+    estimation_error: List[float] = field(default_factory=list)
     repeat_sensing_ratio: List[float] = field(default_factory=list)
     reward_component_history: Dict[str, List[float]] = field(default_factory=dict)
 
@@ -52,6 +53,7 @@ class EpisodeMetrics:
     final_task_uncertainty: float = 0.0
     final_task_aoi: float = 0.0
     final_cognitive_quality: float = 0.0
+    final_estimation_error: float = 0.0
     episode_length: int = 0
     done_reason: str = "unknown"
 
@@ -64,6 +66,7 @@ class EpisodeMetrics:
         self.task_uncertainty.append(float(info.get("mean_task_uncertainty", 0.0)))
         self.task_aoi.append(float(info.get("mean_task_aoi", 0.0)))
         self.cognitive_quality.append(float(info.get("cognitive_quality", 0.0)))
+        self.estimation_error.append(float(info.get("mean_estimation_error", 0.0)))
         self.repeat_sensing_ratio.append(float(info.get("repeat_sensing_ratio", 0.0)))
 
         for key, value in info.items():
@@ -82,6 +85,7 @@ class EpisodeMetrics:
         self.final_task_uncertainty = float(info.get("mean_task_uncertainty", self.final_task_uncertainty))
         self.final_task_aoi = float(info.get("mean_task_aoi", self.final_task_aoi))
         self.final_cognitive_quality = float(info.get("cognitive_quality", self.final_cognitive_quality))
+        self.final_estimation_error = float(info.get("mean_estimation_error", self.final_estimation_error))
         self.episode_length = int(info.get("step", len(self.rewards)))
         self.done_reason = str(info.get("termination_reason", self.done_reason))
 
@@ -126,6 +130,7 @@ class EpisodeMetrics:
             "final_task_uncertainty": self.final_task_uncertainty,
             "final_task_aoi": self.final_task_aoi,
             "final_cognitive_quality": self.final_cognitive_quality,
+            "final_estimation_error": self.final_estimation_error,
             "done_reason": self.done_reason,
             "final_active_uav_count": int(self.final_active_uav_count),
             "final_total_distance_per_uav": (
@@ -188,6 +193,7 @@ class MetricTracker:
                 "mean_final_task_uncertainty": 0.0,
                 "mean_final_task_aoi": 0.0,
                 "mean_final_cognitive_quality": 0.0,
+                "mean_final_estimation_error": 0.0,
                 "mean_mean_repeat_sensing_ratio": 0.0,
                 "done_reason_histogram": {},
                 "reward_component_episode_total_means": {},
@@ -210,6 +216,7 @@ class MetricTracker:
         final_task_uncertainty = np.array([x.get("final_task_uncertainty", 0.0) for x in self.episode_summaries], dtype=np.float32)
         final_task_aoi = np.array([x.get("final_task_aoi", 0.0) for x in self.episode_summaries], dtype=np.float32)
         final_cognitive_quality = np.array([x.get("final_cognitive_quality", 0.0) for x in self.episode_summaries], dtype=np.float32)
+        final_estimation_error = np.array([x.get("final_estimation_error", 0.0) for x in self.episode_summaries], dtype=np.float32)
         mean_repeat_sensing_ratio = np.array([x.get("mean_repeat_sensing_ratio", 0.0) for x in self.episode_summaries], dtype=np.float32)
 
         done_reason_histogram: Dict[str, int] = {}
@@ -246,6 +253,7 @@ class MetricTracker:
             "mean_final_task_uncertainty": float(np.mean(final_task_uncertainty)),
             "mean_final_task_aoi": float(np.mean(final_task_aoi)),
             "mean_final_cognitive_quality": float(np.mean(final_cognitive_quality)),
+            "mean_final_estimation_error": float(np.mean(final_estimation_error)),
             "mean_mean_repeat_sensing_ratio": float(np.mean(mean_repeat_sensing_ratio)),
             "done_reason_histogram": done_reason_histogram,
             "reward_component_episode_total_means": reward_component_episode_total_means,
