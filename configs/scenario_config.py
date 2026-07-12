@@ -109,6 +109,17 @@ class ScenarioConfig:
     task_priority_max: float = 1.5
     trusted_sensing_uncertainty_target: float = 0.20
 
+    # Independent resource-cognition environment.
+    use_resource_cognition: bool = False
+    num_cognition_tasks: int = 20
+    cognition_num_bands: int = 1
+    cognition_max_task_slots: int = 8
+    cognition_observation_noise_std: float = 0.05
+    cognition_aoi_increment: float = 1.0
+    cognition_task_uncertainty_reduction: float = 0.45
+    cognition_sensing_cost: float = 0.05
+    cognition_repeat_penalty: float = 1.0
+
     # =========================
     # Reward（ppo_main 基线原始 reward）
     # =========================
@@ -208,6 +219,16 @@ class ScenarioConfig:
         self.trusted_sensing_uncertainty_target = float(
             min(max(self.trusted_sensing_uncertainty_target, 0.0), 1.0)
         )
+        self.num_cognition_tasks = int(max(self.num_cognition_tasks, 1))
+        self.cognition_num_bands = int(max(self.cognition_num_bands, 1))
+        self.cognition_max_task_slots = int(max(self.cognition_max_task_slots, 1))
+        self.cognition_observation_noise_std = float(max(self.cognition_observation_noise_std, 0.0))
+        self.cognition_aoi_increment = float(max(self.cognition_aoi_increment, 0.0))
+        self.cognition_task_uncertainty_reduction = float(
+            min(max(self.cognition_task_uncertainty_reduction, 0.0), 1.0)
+        )
+        self.cognition_sensing_cost = float(max(self.cognition_sensing_cost, 0.0))
+        self.cognition_repeat_penalty = float(max(self.cognition_repeat_penalty, 0.0))
         self.reward_weight_uncertainty_gain = float(max(self.reward_weight_uncertainty_gain, 0.0))
         self.reward_weight_aoi_gain = float(max(self.reward_weight_aoi_gain, 0.0))
         self.reward_weight_repeat_sensing_penalty = float(max(self.reward_weight_repeat_sensing_penalty, 0.0))
@@ -255,6 +276,10 @@ class ScenarioConfig:
         if bool(self.use_enhanced_obs):
             return self.get_mcg_local_obs_dim()
         return self.get_ppo_main_local_obs_dim()
+
+    def get_resource_cognition_action_dim(self) -> int:
+        """Movement actions plus one explicit sensing action per local slot."""
+        return int(5 + self.cognition_max_task_slots)
 
     def validate(self) -> None:
         if self.r_safe <= 0 or self.r_disaster <= self.r_safe:
@@ -326,6 +351,15 @@ class ScenarioConfig:
 
         if self.sensing_radius <= 0:
             raise ValueError("sensing_radius must be positive.")
+
+        if self.num_cognition_tasks <= 0:
+            raise ValueError("num_cognition_tasks must be positive.")
+
+        if self.cognition_num_bands <= 0:
+            raise ValueError("cognition_num_bands must be positive.")
+
+        if self.cognition_max_task_slots <= 0:
+            raise ValueError("cognition_max_task_slots must be positive.")
 
         if self.task_min_uncertainty > self.task_initial_uncertainty:
             raise ValueError("task_min_uncertainty must not exceed task_initial_uncertainty.")

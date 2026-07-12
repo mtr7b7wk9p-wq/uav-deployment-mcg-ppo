@@ -70,6 +70,7 @@ MAIN_RL_METHODS: List[str] = [
     "ppo_main",
     "mcg_ppo",
     "mcg_ppo_sensing",
+    "mcg_ppo_resource_cognition",
     "ippo",
     "maddpg",
 ]
