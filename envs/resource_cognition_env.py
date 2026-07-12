@@ -305,6 +305,8 @@ class ResourceCognitionEnv:
             "reward_total": float(reward),
             "uncertainty_gain": float(uncertainty_gain),
             "aoi_gain": float(aoi_gain),
+            "reward_uncertainty_gain": float(uncertainty_gain),
+            "reward_aoi_gain": float(aoi_gain),
             "repeat_sensing_ratio": float(repeat_ratio),
             "mean_task_uncertainty": weighted_uncertainty,
             "mean_task_aoi": weighted_aoi,

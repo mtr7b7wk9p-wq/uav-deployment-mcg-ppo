@@ -101,6 +101,11 @@ def standardize_run_result(
         "full_coverage_success": safe_bool(
             getattr(result, "success", episode_summary.get("full_coverage_success", False))
         ),
+        "final_task_uncertainty": safe_float(episode_summary.get("final_task_uncertainty", env_info.get("mean_task_uncertainty", 0.0))),
+        "final_task_aoi": safe_float(episode_summary.get("final_task_aoi", env_info.get("mean_task_aoi", 0.0))),
+        "final_cognitive_quality": safe_float(episode_summary.get("final_cognitive_quality", env_info.get("cognitive_quality", 0.0))),
+        "mean_repeat_sensing_ratio": safe_float(episode_summary.get("mean_repeat_sensing_ratio", env_info.get("repeat_sensing_ratio", 0.0))),
+        "evaluation_domain": "resource_cognition" if bool(getattr(scenario_cfg, "use_resource_cognition", False)) else "coverage",
 
         "active_uav_count": safe_int(getattr(result, "active_uav_count", 0)),
         "trainer_family": raw.get("trainer_family"),
@@ -130,6 +135,10 @@ def aggregate_method_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         for x in records
     ]
 
+    domains = {str(x.get("evaluation_domain", "coverage")) for x in normalized}
+    if len(domains) > 1:
+        raise ValueError(f"Cannot aggregate mixed evaluation domains: {sorted(domains)}")
+
     method_name = str(normalized[0].get("method_name", ""))
     display_name = str(normalized[0].get("display_name", method_name))
 
@@ -151,6 +160,11 @@ def aggregate_method_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         "mean_mean_overlap_users_step": _mean("mean_overlap_users_step"),
         "mean_episode_length": _mean("episode_length"),
         "full_coverage_success_rate": _mean("full_coverage_success"),
+        "mean_final_task_uncertainty": _mean("final_task_uncertainty"),
+        "mean_final_task_aoi": _mean("final_task_aoi"),
+        "mean_final_cognitive_quality": _mean("final_cognitive_quality"),
+        "mean_mean_repeat_sensing_ratio": _mean("mean_repeat_sensing_ratio"),
+        "evaluation_domain": next(iter(domains), "coverage"),
 
         "std_final_coverage_ratio": (
             sum((safe_float(x.get("final_coverage_ratio", 0.0)) - _mean("final_coverage_ratio")) ** 2 for x in normalized) / float(n)
@@ -206,6 +220,11 @@ def build_paper_table_rows(compare_items: List[Dict[str, Any]]) -> List[Dict[str
                 "mean_overlap_users_step": safe_float(normalized["mean_mean_overlap_users_step"]),
                 "episode_length": safe_float(normalized["mean_episode_length"]),
                 "full_coverage_success": safe_float(normalized["full_coverage_success_rate"]),
+                "final_task_uncertainty": safe_float(normalized["mean_final_task_uncertainty"]),
+                "final_task_aoi": safe_float(normalized["mean_final_task_aoi"]),
+                "final_cognitive_quality": safe_float(normalized["mean_final_cognitive_quality"]),
+                "mean_repeat_sensing_ratio": safe_float(normalized["mean_mean_repeat_sensing_ratio"]),
+                "evaluation_domain": normalized.get("evaluation_domain", "coverage"),
             }
         )
     return rows

@@ -30,6 +30,7 @@ from configs.ablation_config import (
     resolve_method_name,
 )
 from envs.disaster_deployment_env import DisasterDeploymentEnv
+from envs.resource_cognition_env import ResourceCognitionEnv
 from envs.metrics import EpisodeMetrics, MetricTracker
 from plotting.plot_scene import plot_training_history
 from utils.experiment_schema import (
@@ -94,6 +95,19 @@ def _copy_if_exists(src_path: str, dst_path: str) -> None:
     shutil.copy2(src_path, dst_path)
 
 
+def build_training_env(scenario_cfg):
+    """Select an environment without changing the legacy coverage path."""
+    if bool(getattr(scenario_cfg, "use_resource_cognition", False)):
+        return ResourceCognitionEnv(scenario_cfg)
+    return DisasterDeploymentEnv(scenario_cfg)
+
+
+def get_training_action_dim(scenario_cfg) -> int:
+    if bool(getattr(scenario_cfg, "use_resource_cognition", False)):
+        return int(scenario_cfg.get_resource_cognition_action_dim())
+    return int(scenario_cfg.action_size)
+
+
 def ensure_method_ckpt_alias(output_root: str, method_dir_name: str, src_path: str, filename: str) -> str:
     alias_dir = os.path.join(output_root, method_dir_name, "checkpoints")
     os.makedirs(alias_dir, exist_ok=True)
@@ -111,7 +125,7 @@ def sync_train_alias_artifacts(output_root: str, method_dir_name: str, dirs: Dic
 
 
 def run_one_episode_collect_shared(
-    env: DisasterDeploymentEnv,
+    env: Any,
     agent: SharedPPOAgent,
     buffer: PPOBuffer,
     seed: Optional[int] = None,
@@ -125,8 +139,8 @@ def run_one_episode_collect_shared(
     done = False
 
     last_info: Dict[str, Any] = {
-        "coverage_ratio": float(env.coverage_ratio),
-        "covered_users": int(env.covered_mask.sum()),
+        "coverage_ratio": float(getattr(env, "coverage_ratio", 0.0)),
+        "covered_users": int(getattr(env, "covered_mask", np.zeros((0,), dtype=bool)).sum()),
         "total_distance_per_uav": env.total_distance_per_uav.copy(),
         "remaining_time": env.remaining_time.copy(),
         "step": 0,
@@ -166,7 +180,7 @@ def run_one_episode_collect_shared(
 
 
 def run_one_episode_collect_ippo(
-    env: DisasterDeploymentEnv,
+    env: Any,
     agent: IndependentPPOAgent,
     buffer: IPPOBuffer,
     seed: Optional[int] = None,
@@ -180,8 +194,8 @@ def run_one_episode_collect_ippo(
     done = False
 
     last_info: Dict[str, Any] = {
-        "coverage_ratio": float(env.coverage_ratio),
-        "covered_users": int(env.covered_mask.sum()),
+        "coverage_ratio": float(getattr(env, "coverage_ratio", 0.0)),
+        "covered_users": int(getattr(env, "covered_mask", np.zeros((0,), dtype=bool)).sum()),
         "total_distance_per_uav": env.total_distance_per_uav.copy(),
         "remaining_time": env.remaining_time.copy(),
         "step": 0,
@@ -221,7 +235,7 @@ def run_one_episode_collect_ippo(
 
 
 def run_one_episode_collect_maddpg(
-    env: DisasterDeploymentEnv,
+    env: Any,
     agent: MADDPGAgent,
     replay_buffer: MADDPGReplayBuffer,
     seed: Optional[int] = None,
@@ -236,8 +250,8 @@ def run_one_episode_collect_maddpg(
     episode_update_stats: List[Dict[str, Any]] = []
 
     last_info: Dict[str, Any] = {
-        "coverage_ratio": float(env.coverage_ratio),
-        "covered_users": int(env.covered_mask.sum()),
+        "coverage_ratio": float(getattr(env, "coverage_ratio", 0.0)),
+        "covered_users": int(getattr(env, "covered_mask", np.zeros((0,), dtype=bool)).sum()),
         "total_distance_per_uav": env.total_distance_per_uav.copy(),
         "remaining_time": env.remaining_time.copy(),
         "step": 0,
@@ -290,7 +304,7 @@ def evaluate_policy(
     tracker = MetricTracker()
 
     for ep in range(eval_episodes):
-        env = DisasterDeploymentEnv(env_cfg)
+        env = build_training_env(env_cfg)
         obs_dict = env.reset(seed=base_seed + ep)
 
         local_obs = obs_dict["local_obs"]
@@ -323,7 +337,11 @@ def evaluate_policy(
 
 
 def get_eval_selection_metric(scenario_cfg) -> str:
-    return "mean_final_cognitive_quality" if scenario_cfg.use_trusted_sensing else "mean_final_coverage_ratio"
+    return (
+        "mean_final_cognitive_quality"
+        if scenario_cfg.use_trusted_sensing or scenario_cfg.use_resource_cognition
+        else "mean_final_coverage_ratio"
+    )
 
 
 def get_eval_selection_score(eval_summary: Dict[str, Any], scenario_cfg) -> float:
@@ -419,13 +437,23 @@ def _build_common_run_context(
 
     set_global_seed(train_cfg.seed)
 
-    run_tag = (
-        f"{method_name}"
-        f"_cfg{ablation_spec.config_name}"
-        f"_m{scenario_cfg.max_candidate_uavs}"
-        f"_u{scenario_cfg.num_users}"
-    )
-    run_name = build_run_name(prefix="train", method=method_name, tag=run_tag)
+    if scenario_cfg.use_resource_cognition:
+        run_tag = (
+            f"rc_cfg{ablation_spec.config_name}"
+            f"_m{scenario_cfg.max_candidate_uavs}"
+            f"_t{scenario_cfg.num_cognition_tasks}"
+        )
+    else:
+        run_tag = (
+            f"{method_name}"
+            f"_cfg{ablation_spec.config_name}"
+            f"_m{scenario_cfg.max_candidate_uavs}"
+            f"_u{scenario_cfg.num_users}"
+        )
+    if scenario_cfg.use_resource_cognition:
+        run_name = build_run_name(prefix="train_rc", method="ppo", tag=run_tag)
+    else:
+        run_name = build_run_name(prefix="train", method=method_name, tag=run_tag)
     dirs = build_run_dirs(train_cfg.output_root, run_name)
 
     if method_name == "ippo":
@@ -473,7 +501,7 @@ def run_registered_shared_training(
     ppo_cfg_kwargs = build_method_ppo_config_kwargs(
         method_name=method_name,
         local_obs_dim=local_obs_dim,
-        action_dim=int(scenario_cfg.action_size),
+        action_dim=get_training_action_dim(scenario_cfg),
         device=train_cfg.device,
         max_obs_users=int(scenario_cfg.max_obs_users),
         max_obs_uavs=int(scenario_cfg.max_obs_uavs),
@@ -519,7 +547,7 @@ def run_registered_shared_training(
         rollout_tracker = MetricTracker()
 
         for _ in range(train_cfg.rollout_episodes_per_update):
-            env = DisasterDeploymentEnv(scenario_cfg)
+            env = build_training_env(scenario_cfg)
             collected = run_one_episode_collect_shared(
                 env=env,
                 agent=agent,
@@ -566,7 +594,7 @@ def run_registered_shared_training(
         }
         update_logs.append(log_record)
 
-        if scenario_cfg.use_trusted_sensing:
+        if scenario_cfg.use_trusted_sensing or scenario_cfg.use_resource_cognition:
             print(
                 f"[{method_name}][Update {update_idx:04d}] "
                 f"quality={rollout_summary.get('mean_final_cognitive_quality', 0.0):.4f}  "
@@ -605,12 +633,20 @@ def run_registered_shared_training(
             eval_score = get_eval_selection_score(eval_summary, scenario_cfg)
             eval_summary["selection_metric"] = best_eval_metric
             eval_summary["selection_score"] = eval_score
-            print(
-                f"  [Eval-{method_name}] {best_eval_metric}={eval_score:.4f}  "
-                f"covered_users={eval_summary.get('mean_final_covered_users', 0.0):.2f}  "
-                f"move={eval_summary.get('mean_total_move_distance', 0.0):.2f}  "
-                f"success={eval_summary.get('full_coverage_success_rate', 0.0):.3f}"
-            )
+            if scenario_cfg.use_trusted_sensing or scenario_cfg.use_resource_cognition:
+                print(
+                    f"  [Eval-{method_name}] {best_eval_metric}={eval_score:.4f}  "
+                    f"uncertainty={eval_summary.get('mean_final_task_uncertainty', 0.0):.4f}  "
+                    f"aoi={eval_summary.get('mean_final_task_aoi', 0.0):.2f}  "
+                    f"repeat={eval_summary.get('mean_mean_repeat_sensing_ratio', 0.0):.3f}"
+                )
+            else:
+                print(
+                    f"  [Eval-{method_name}] {best_eval_metric}={eval_score:.4f}  "
+                    f"covered_users={eval_summary.get('mean_final_covered_users', 0.0):.2f}  "
+                    f"move={eval_summary.get('mean_total_move_distance', 0.0):.2f}  "
+                    f"success={eval_summary.get('full_coverage_success_rate', 0.0):.3f}"
+                )
 
             if eval_score >= best_eval_score:
                 best_eval_score = eval_score
@@ -755,7 +791,7 @@ def run_registered_ippo_training(
     ippo_cfg_kwargs = build_method_ppo_config_kwargs(
         method_name=method_name,
         local_obs_dim=local_obs_dim,
-        action_dim=int(scenario_cfg.action_size),
+        action_dim=get_training_action_dim(scenario_cfg),
         device=train_cfg.device,
         max_obs_users=int(scenario_cfg.max_obs_users),
         max_obs_uavs=int(scenario_cfg.max_obs_uavs),
@@ -802,7 +838,7 @@ def run_registered_ippo_training(
         rollout_tracker = MetricTracker()
 
         for _ in range(train_cfg.rollout_episodes_per_update):
-            env = DisasterDeploymentEnv(scenario_cfg)
+            env = build_training_env(scenario_cfg)
             collected = run_one_episode_collect_ippo(
                 env=env,
                 agent=agent,
@@ -1019,7 +1055,7 @@ def run_registered_maddpg_training(
     maddpg_cfg = MADDPGConfig(
         num_agents=int(scenario_cfg.max_candidate_uavs),
         local_obs_dim=local_obs_dim,
-        action_dim=int(scenario_cfg.action_size),
+        action_dim=get_training_action_dim(scenario_cfg),
         actor_hidden_dim=256,
         critic_hidden_dim=256,
         num_hidden_layers=2,
@@ -1080,7 +1116,7 @@ def run_registered_maddpg_training(
         online_update_stats_list: List[Dict[str, Any]] = []
 
         for _ in range(train_cfg.rollout_episodes_per_update):
-            env = DisasterDeploymentEnv(scenario_cfg)
+            env = build_training_env(scenario_cfg)
             collected = run_one_episode_collect_maddpg(
                 env=env,
                 agent=agent,

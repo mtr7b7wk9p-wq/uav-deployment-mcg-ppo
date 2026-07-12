@@ -312,6 +312,11 @@ def normalize_episode_record(
         "full_coverage_success": safe_bool(
             record.get("full_coverage_success", record.get("success", False))
         ),
+        "final_task_uncertainty": safe_float(record.get("final_task_uncertainty", 0.0)),
+        "final_task_aoi": safe_float(record.get("final_task_aoi", 0.0)),
+        "final_cognitive_quality": safe_float(record.get("final_cognitive_quality", 0.0)),
+        "mean_repeat_sensing_ratio": safe_float(record.get("mean_repeat_sensing_ratio", 0.0)),
+        "evaluation_domain": str(record.get("evaluation_domain", "coverage")),
 
         "active_uav_count": safe_int(record.get("active_uav_count", 0)),
         "trainer_family": record.get("trainer_family"),
@@ -365,6 +370,11 @@ def normalize_method_aggregate(
         "full_coverage_success_rate": safe_float(
             aggregate.get("full_coverage_success_rate", aggregate.get("success_rate", 0.0))
         ),
+        "mean_final_task_uncertainty": safe_float(aggregate.get("mean_final_task_uncertainty", 0.0)),
+        "mean_final_task_aoi": safe_float(aggregate.get("mean_final_task_aoi", 0.0)),
+        "mean_final_cognitive_quality": safe_float(aggregate.get("mean_final_cognitive_quality", 0.0)),
+        "mean_mean_repeat_sensing_ratio": safe_float(aggregate.get("mean_mean_repeat_sensing_ratio", 0.0)),
+        "evaluation_domain": str(aggregate.get("evaluation_domain", "coverage")),
 
         "std_final_coverage_ratio": safe_float(
             aggregate.get("std_final_coverage_ratio", 0.0)
@@ -541,6 +551,10 @@ def build_paper_metric_row(method_identity: Dict[str, Any], aggregate: Dict[str,
         ),
         "mean_overlap_users_step": float(aggregate.get("mean_mean_overlap_users_step", 0.0)),
         "episode_length": float(aggregate.get("mean_episode_length", 0.0)),
+        "final_task_uncertainty": float(aggregate.get("mean_final_task_uncertainty", 0.0)),
+        "final_task_aoi": float(aggregate.get("mean_final_task_aoi", 0.0)),
+        "final_cognitive_quality": float(aggregate.get("mean_final_cognitive_quality", 0.0)),
+        "mean_repeat_sensing_ratio": float(aggregate.get("mean_mean_repeat_sensing_ratio", 0.0)),
         "trainer_family": method_identity.get("trainer_family"),
         "policy_family": method_identity.get("policy_family"),
         "agent_type": method_identity.get("agent_type"),

@@ -11,27 +11,31 @@ python runners/train_ppo_deployment.py --method-name mcg_ppo
 ```
 python runners/train_ppo_deployment.py --method-name mcg_ppo_sensing
 ```
-### 3. maddpg
+### 4. mcg_ppo_resource_cognition
+```
+python runners/train_ppo_deployment.py --method-name mcg_ppo_resource_cognition
+```
+### 5. maddpg
 ```
 python runners/train_ppo_deployment.py --method-name maddpg
 ```
-### 4. ippo
+### 6. ippo
 ```
 python runners/train_ppo_deployment.py --method-name ippo
 ```
-### 3. mcg_ppo_no_graph
+### 7. mcg_ppo_no_graph
 ```
 python runners/train_ppo_deployment.py --method-name mcg_ppo_no_graph
 ```
-### 4. mcg_ppo_no_mc_reward
+### 8. mcg_ppo_no_mc_reward
 ```
 python runners/train_ppo_deployment.py --method-name mcg_ppo_no_mc_reward
 ```
-### 5. mcg_ppo_no_overlap_penalty
+### 9. mcg_ppo_no_overlap_penalty
 ```
 python runners/train_ppo_deployment.py --method-name mcg_ppo_no_overlap_penalty
 ```
-### 6. mcg_ppo_no_guidance
+### 10. mcg_ppo_no_guidance
 ```
 python runners/train_ppo_deployment.py --method-name mcg_ppo_no_guidance
 ```

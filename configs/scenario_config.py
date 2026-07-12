@@ -273,9 +273,14 @@ class ScenarioConfig:
         return int(self.get_ppo_main_local_obs_dim() + mcg_extra_obs_dim)
 
     def get_local_obs_dim(self, method_name: str | None = None) -> int:
+        if bool(self.use_resource_cognition):
+            return self.get_resource_cognition_local_obs_dim()
         if bool(self.use_enhanced_obs):
             return self.get_mcg_local_obs_dim()
         return self.get_ppo_main_local_obs_dim()
+
+    def get_resource_cognition_local_obs_dim(self) -> int:
+        return int(6 + self.cognition_max_task_slots * 7 + self.max_obs_uavs * 4)
 
     def get_resource_cognition_action_dim(self) -> int:
         """Movement actions plus one explicit sensing action per local slot."""
