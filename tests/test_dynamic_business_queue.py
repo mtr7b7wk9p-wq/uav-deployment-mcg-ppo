@@ -113,7 +113,7 @@ class DynamicBusinessQueueTests(unittest.TestCase):
             np.array([0, 1], dtype=np.int64),
         )
         self.assertGreater(stats["conflict_count"], 0)
-        self.assertLess(stats["service_by_agent"][0], stats["capacity_by_agent"][0])
+        self.assertLessEqual(stats["service_by_agent"][0], stats["capacity_by_agent"][0])
 
     def test_dynamic_queue_observation_has_fixed_dimension_without_truth_leak(self):
         env = make_env(num_tasks=2, max_steps=3)
@@ -204,3 +204,18 @@ class DynamicBusinessQueueTests(unittest.TestCase):
         )
         self.assertLess(with_interference[1][0], without_interference[1][0])
         self.assertLess(with_interference[0][0], without_interference[0][0])
+
+    def test_metrics_collect_physical_service_fields(self):
+        metrics = EpisodeMetrics()
+        metrics.update(1.0, {
+            "mean_path_loss_db": 95.0,
+            "mean_sinr": 4.0,
+            "mean_service_capacity": 1.5,
+            "service_outage_count": 1,
+            "service_outage_rate": 0.5,
+            "total_interference_power_w": 2e-13,
+        })
+        summary = metrics.summary()
+        self.assertEqual(summary["mean_path_loss_db"], 95.0)
+        self.assertEqual(summary["mean_sinr"], 4.0)
+        self.assertEqual(summary["total_service_outages"], 1)

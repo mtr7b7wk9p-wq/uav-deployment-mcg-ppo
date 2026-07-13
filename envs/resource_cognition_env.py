@@ -7,6 +7,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from configs.scenario_config import ScenarioConfig
+from envs.channel import (
+    AirToGroundChannelConfig,
+    average_atg_path_loss_db,
+    channel_gain_from_path_loss_db,
+    shannon_rate_mbps,
+)
 from envs.communication_model import CognitionMessage, NeighborCommunicationModel
 from envs.geometry import (
     clip_point_to_ring,
@@ -44,6 +50,9 @@ class ResourceCognitionEnv:
         self.communication_model: Optional[NeighborCommunicationModel] = None
         self._received_message_cache: List[Dict[int, Tuple[CognitionMessage, bool]]] = []
         self._slot_task_indices: List[np.ndarray] = []
+        self._last_interference_power_by_agent = np.zeros(
+            (self.num_agents,), dtype=np.float32
+        )
         self._last_info: Dict[str, Any] = {}
 
     def reset(self, seed: Optional[int] = None) -> Dict[str, Any]:
@@ -114,6 +123,7 @@ class ResourceCognitionEnv:
         self._received_message_cache = [dict() for _ in range(self.num_agents)]
         self.remaining_time[:] = self.cfg.uav_max_time
         self.total_distance_per_uav[:] = 0.0
+        self._last_interference_power_by_agent[:] = 0.0
         self._last_info = self._build_info(
             reward=0.0,
             uncertainty_gain=0.0,
@@ -383,6 +393,20 @@ class ResourceCognitionEnv:
                 ),
                 "service_energy_consumption": float(
                     scheduling_stats["energy_consumption"]
+                ),
+                "mean_path_loss_db": float(scheduling_stats["mean_path_loss_db"]),
+                "mean_sinr": float(scheduling_stats["mean_sinr"]),
+                "mean_service_capacity": float(
+                    scheduling_stats["mean_service_capacity"]
+                ),
+                "service_outage_count": int(
+                    scheduling_stats["service_outage_count"]
+                ),
+                "service_outage_rate": float(
+                    scheduling_stats["service_outage_rate"]
+                ),
+                "total_interference_power_w": float(
+                    scheduling_stats["total_interference_power_w"]
                 ),
                 "per_agent_served_data": scheduling_stats["service_by_agent"].copy(),
                 "service_reward": float(service_reward),
@@ -745,6 +769,26 @@ class ResourceCognitionEnv:
                 float(team_utility - counterfactual_utility), 0.0
             )
 
+        _, sinr_by_agent, path_loss_by_agent, outage_by_agent = (
+            self._physical_service_capacity(
+                assignments,
+                conflict_counts,
+                use_truth=True,
+            )
+        )
+        scheduled_count = max(int(np.count_nonzero(assignments >= 0)), 1)
+        scheduled_mask = assignments >= 0
+        mean_path_loss_db = float(
+            np.sum(path_loss_by_agent) / scheduled_count
+        )
+        mean_sinr = float(np.sum(sinr_by_agent) / scheduled_count)
+        mean_service_capacity = float(np.sum(capacity_by_agent) / scheduled_count)
+        service_outage_count = int(np.sum(outage_by_agent))
+        service_outage_rate = float(service_outage_count / scheduled_count)
+        total_interference_power_w = float(
+            np.sum(self._last_interference_power_by_agent[scheduled_mask])
+        )
+
         queue_before = truth.queue_lengths.copy()
         served_by_task = np.zeros((len(truth),), dtype=np.float32)
         for agent_id in np.flatnonzero(assignments >= 0):
@@ -797,6 +841,15 @@ class ResourceCognitionEnv:
             "estimated_team_utility": float(estimated_utility),
             "service_by_agent": service_by_agent,
             "capacity_by_agent": capacity_by_agent,
+            "sinr_by_agent": sinr_by_agent,
+            "path_loss_by_agent": path_loss_by_agent,
+            "outage_by_agent": outage_by_agent,
+            "mean_path_loss_db": mean_path_loss_db,
+            "mean_sinr": mean_sinr,
+            "mean_service_capacity": mean_service_capacity,
+            "service_outage_count": service_outage_count,
+            "service_outage_rate": service_outage_rate,
+            "total_interference_power_w": total_interference_power_w,
             "served_by_task": served_by_task,
             "served_data": float(served_data),
             "service_rate": service_rate,
@@ -835,6 +888,108 @@ class ResourceCognitionEnv:
         ).astype(np.float32)
         return np.maximum(expected + arrival_noise, 0.0).astype(np.float32)
 
+    def _physical_service_capacity(
+        self,
+        assignments: np.ndarray,
+        conflict_counts: np.ndarray,
+        *,
+        use_truth: bool,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        truth, beliefs = self._require_state()
+        assignments = np.asarray(assignments, dtype=np.int64)
+        conflict_counts = np.asarray(conflict_counts, dtype=np.float32)
+        if assignments.shape != (self.num_agents,):
+            raise ValueError("assignments must match the number of agents.")
+        if conflict_counts.shape != (self.num_agents,):
+            raise ValueError("conflict_counts must match the number of agents.")
+
+        channel_cfg = AirToGroundChannelConfig(
+            mode="paper_atg",
+            carrier_freq_ghz=self.cfg.cognition_channel_carrier_freq_ghz,
+            los_a=self.cfg.cognition_channel_los_a,
+            los_b=self.cfg.cognition_channel_los_b,
+            eta_los_db=self.cfg.cognition_channel_eta_los_db,
+            eta_nlos_db=self.cfg.cognition_channel_eta_nlos_db,
+        )
+        path_loss_matrix, _, _, _ = average_atg_path_loss_db(
+            truth.positions_xy,
+            self.uav_positions,
+            channel_cfg,
+        )
+        gain_matrix = channel_gain_from_path_loss_db(path_loss_matrix)
+        assigned_agents = np.flatnonzero(assignments >= 0)
+        capacity_by_agent = np.zeros((self.num_agents,), dtype=np.float32)
+        sinr_by_agent = np.zeros((self.num_agents,), dtype=np.float32)
+        path_loss_by_agent = np.zeros((self.num_agents,), dtype=np.float32)
+        outage_by_agent = np.zeros((self.num_agents,), dtype=bool)
+        interference_by_agent = np.zeros((self.num_agents,), dtype=np.float32)
+
+        def spectrum_availability(agent_id: int, task_id: int) -> float:
+            if use_truth:
+                return float(np.clip(1.0 - truth.true_states[task_id], 0.0, 1.0))
+            return float(np.clip(1.0 - beliefs.estimates[agent_id, task_id], 0.0, 1.0))
+
+        for agent_id in assigned_agents:
+            task_id = int(assignments[agent_id])
+            availability = spectrum_availability(int(agent_id), task_id)
+            desired_power = (
+                self.cfg.cognition_tx_power_w
+                * float(gain_matrix[task_id, agent_id])
+                * availability
+            )
+            interference_power = 0.0
+            for other_id in assigned_agents:
+                if int(other_id) == int(agent_id):
+                    continue
+                other_task_id = int(assignments[other_id])
+                if truth.band_ids[other_task_id] != truth.band_ids[task_id]:
+                    continue
+                other_availability = spectrum_availability(int(other_id), other_task_id)
+                interference_power += (
+                    self.cfg.cognition_tx_power_w
+                    * float(gain_matrix[task_id, other_id])
+                    * other_availability
+                )
+
+            sinr = desired_power / max(
+                self.cfg.cognition_noise_power_w + interference_power,
+                1e-30,
+            )
+            rate_mbps = float(
+                shannon_rate_mbps(
+                    self.cfg.cognition_bandwidth_mhz,
+                    np.asarray([sinr], dtype=np.float32),
+                )[0]
+            )
+            capacity = rate_mbps * self.cfg.cognition_service_duration_s
+            energy_factor = float(
+                np.clip(
+                    self.remaining_time[agent_id]
+                    / max(self.cfg.uav_max_time, 1e-6),
+                    0.0,
+                    1.0,
+                )
+            )
+            capacity *= energy_factor
+            capacity /= 1.0 + 0.5 * max(float(conflict_counts[agent_id]), 0.0)
+            outage = (
+                availability <= 1e-6
+                or sinr < self.cfg.cognition_outage_sinr_threshold
+            )
+            if outage:
+                capacity = 0.0
+
+            capacity_by_agent[agent_id] = float(
+                min(capacity, self.cfg.cognition_max_service_per_step)
+            )
+            sinr_by_agent[agent_id] = float(sinr)
+            path_loss_by_agent[agent_id] = float(path_loss_matrix[task_id, agent_id])
+            outage_by_agent[agent_id] = bool(outage)
+            interference_by_agent[agent_id] = float(interference_power)
+
+        self._last_interference_power_by_agent = interference_by_agent
+        return capacity_by_agent, sinr_by_agent, path_loss_by_agent, outage_by_agent
+
     def _evaluate_schedule(
         self,
         assignments: np.ndarray,
@@ -859,42 +1014,14 @@ class ResourceCognitionEnv:
                     conflict_counts[agent_id] += 1.0
                     conflict_counts[other_id] += 1.0
 
-        capacity_by_agent = np.zeros((self.num_agents,), dtype=np.float32)
+        capacity_by_agent, _, _, _ = self._physical_service_capacity(
+            assignments,
+            conflict_counts,
+            use_truth=use_truth,
+        )
         service_by_agent = np.zeros((self.num_agents,), dtype=np.float32)
-        for agent_id in assigned_agents:
-            task_id = int(assignments[agent_id])
-            distance = float(
-                np.linalg.norm(
-                    self.uav_positions[agent_id, :2] - truth.positions_xy[task_id]
-                )
-            )
-            link_quality = float(
-                np.exp(-distance / max(self.cfg.sensing_radius, 1e-6))
-            )
-            energy_factor = float(
-                np.clip(
-                    self.remaining_time[agent_id]
-                    / max(self.cfg.uav_max_time, 1e-6),
-                    0.0,
-                    1.0,
-                )
-            )
-            availability_value = (
-                1.0 - float(truth.true_states[task_id])
-                if use_truth
-                else 1.0 - float(beliefs.estimates[agent_id, task_id])
-            )
-            raw_capacity = (
-                self.cfg.cognition_base_service_rate
-                * link_quality
-                * np.clip(availability_value, 0.0, 1.0)
-                * energy_factor
-            )
-            capacity_by_agent[agent_id] = float(
-                min(raw_capacity, self.cfg.cognition_max_service_per_step)
-            )
 
-        effective_capacity = capacity_by_agent / (1.0 + conflict_counts)
+        effective_capacity = capacity_by_agent.copy()
         for task_id in np.unique(assignments[assigned_agents]):
             task_agents = assigned_agents[assignments[assigned_agents] == task_id]
             total_capacity = float(np.sum(effective_capacity[task_agents]))
