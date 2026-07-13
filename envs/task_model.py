@@ -17,6 +17,8 @@ class TaskTruth:
     true_state: float
     demand_level: float
     priority: float
+    arrival_rate: float
+    queue_length: float
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,11 @@ class LocalTaskBelief:
     demand_uncertainty: float
     demand_aoi: float
     demand_confidence: float
+    queue_estimate: float
+    queue_uncertainty: float
+    queue_aoi: float
+    queue_confidence: float
+    arrival_estimate: float
     last_update_step: int
 
 
@@ -44,25 +51,46 @@ class TaskTruthBatch:
         true_states: np.ndarray,
         priorities: np.ndarray,
         demand_levels: np.ndarray | None = None,
+        arrival_rates: np.ndarray | None = None,
+        queue_lengths: np.ndarray | None = None,
+        queue_capacity: float = 20.0,
     ) -> None:
         positions = np.asarray(positions_xy, dtype=np.float32)
         bands = np.asarray(band_ids, dtype=np.int32)
         truth = np.asarray(true_states, dtype=np.float32)
         priority = np.asarray(priorities, dtype=np.float32)
         demand = truth.copy() if demand_levels is None else np.asarray(demand_levels, dtype=np.float32)
+        arrivals = (
+            np.zeros_like(truth, dtype=np.float32)
+            if arrival_rates is None
+            else np.asarray(arrival_rates, dtype=np.float32)
+        )
+        queues = (
+            np.zeros_like(truth, dtype=np.float32)
+            if queue_lengths is None
+            else np.asarray(queue_lengths, dtype=np.float32)
+        )
         if positions.ndim != 2 or positions.shape[1] != 2:
             raise ValueError("positions_xy must have shape [N, 2].")
         num_tasks = positions.shape[0]
-        if any(array.shape != (num_tasks,) for array in (bands, truth, demand, priority)):
+        if any(
+            array.shape != (num_tasks,)
+            for array in (bands, truth, demand, priority, arrivals, queues)
+        ):
             raise ValueError("Task truth arrays must have the same length.")
         if num_tasks <= 0:
             raise ValueError("At least one task is required.")
+        if queue_capacity <= 0.0:
+            raise ValueError("queue_capacity must be positive.")
 
         self.positions_xy = positions.copy()
         self.band_ids = bands.copy()
         self.true_states = np.clip(truth, 0.0, 1.0)
         self.demand_levels = np.clip(demand, 0.0, 1.0)
         self.priorities = np.maximum(priority, 0.0)
+        self.arrival_rates = np.maximum(arrivals, 0.0)
+        self.queue_capacity = float(queue_capacity)
+        self.queue_lengths = np.clip(queues, 0.0, self.queue_capacity)
 
     def __len__(self) -> int:
         return int(self.positions_xy.shape[0])
@@ -78,7 +106,31 @@ class TaskTruthBatch:
             true_state=float(self.true_states[task_id]),
             demand_level=float(self.demand_levels[task_id]),
             priority=float(self.priorities[task_id]),
+            arrival_rate=float(self.arrival_rates[task_id]),
+            queue_length=float(self.queue_lengths[task_id]),
         )
+
+    def advance_business(self, arrivals: np.ndarray) -> dict[str, float]:
+        values = np.asarray(arrivals, dtype=np.float32)
+        if values.shape != self.queue_lengths.shape:
+            raise ValueError("arrivals must match queue_lengths shape.")
+        values = np.maximum(values, 0.0)
+        before = self.queue_lengths.copy()
+        raw = before + values
+        self.queue_lengths[:] = np.minimum(raw, self.queue_capacity)
+        accepted = self.queue_lengths - before
+        return {
+            "total_arrivals": float(np.sum(accepted)),
+            "queue_overflow": float(np.sum(np.maximum(raw - self.queue_capacity, 0.0))),
+        }
+
+    def apply_service(self, served: np.ndarray) -> float:
+        values = np.asarray(served, dtype=np.float32)
+        if values.shape != self.queue_lengths.shape:
+            raise ValueError("served must match queue_lengths shape.")
+        actual = np.minimum(np.maximum(values, 0.0), self.queue_lengths)
+        self.queue_lengths[:] -= actual
+        return float(np.sum(actual))
 
     def _validate_task_id(self, task_id: int) -> int:
         task_id = int(task_id)
@@ -128,6 +180,11 @@ class LocalBeliefBatch:
         self.demand_uncertainties = np.full(shape, self.initial_uncertainty, dtype=np.float32)
         self.demand_aoi = np.full(shape, self.initial_aoi, dtype=np.float32)
         self.demand_confidence = np.full(shape, 1.0 - self.initial_uncertainty, dtype=np.float32)
+        self.queue_estimates = np.zeros(shape, dtype=np.float32)
+        self.queue_uncertainties = np.full(shape, 1.0, dtype=np.float32)
+        self.queue_aoi = np.full(shape, self.initial_aoi, dtype=np.float32)
+        self.queue_confidence = np.zeros(shape, dtype=np.float32)
+        self.arrival_estimates = np.zeros(shape, dtype=np.float32)
         self.last_update_step = np.full(shape, -1, dtype=np.int32)
 
     def reset(self) -> None:
@@ -139,6 +196,11 @@ class LocalBeliefBatch:
         self.demand_uncertainties[:] = self.initial_uncertainty
         self.demand_aoi[:] = self.initial_aoi
         self.demand_confidence[:] = 1.0 - self.initial_uncertainty
+        self.queue_estimates[:] = 0.0
+        self.queue_uncertainties[:] = 1.0
+        self.queue_aoi[:] = self.initial_aoi
+        self.queue_confidence[:] = 0.0
+        self.arrival_estimates[:] = 0.0
         self.last_update_step[:] = -1
 
     def age(self, steps: float = 1.0) -> None:
@@ -147,6 +209,7 @@ class LocalBeliefBatch:
         increment = float(steps)
         self.aoi[:] = np.minimum(self.aoi + increment, self.max_aoi)
         self.demand_aoi[:] = np.minimum(self.demand_aoi + increment, self.max_aoi)
+        self.queue_aoi[:] = np.minimum(self.queue_aoi + increment, self.max_aoi)
 
     def apply_local_sensing(
         self,
@@ -155,6 +218,8 @@ class LocalBeliefBatch:
         observations: np.ndarray,
         *,
         demand_observations: np.ndarray | None = None,
+        queue_observations: np.ndarray | None = None,
+        arrival_observations: np.ndarray | None = None,
         uncertainty_reduction: float,
         demand_uncertainty_reduction: float | None = None,
         current_step: int,
@@ -169,6 +234,8 @@ class LocalBeliefBatch:
                 "aoi_gain": 0.0,
                 "demand_uncertainty_gain": 0.0,
                 "demand_aoi_gain": 0.0,
+                "queue_uncertainty_gain": 0.0,
+                "queue_aoi_gain": 0.0,
                 "information_gain": np.zeros((0,), dtype=np.float32),
             }
         if agents.shape != tasks.shape or agents.shape != spectrum_values.shape:
@@ -179,6 +246,18 @@ class LocalBeliefBatch:
             demand_values = np.asarray(demand_observations, dtype=np.float32)
             if demand_values.shape != agents.shape:
                 raise ValueError("demand_observations must match agent_ids shape.")
+        if queue_observations is None:
+            queue_values = self.queue_estimates[agents, tasks].copy()
+        else:
+            queue_values = np.asarray(queue_observations, dtype=np.float32)
+            if queue_values.shape != agents.shape:
+                raise ValueError("queue_observations must match agent_ids shape.")
+        if arrival_observations is None:
+            arrival_values = self.arrival_estimates[agents, tasks].copy()
+        else:
+            arrival_values = np.asarray(arrival_observations, dtype=np.float32)
+            if arrival_values.shape != agents.shape:
+                raise ValueError("arrival_observations must match agent_ids shape.")
         if np.any(agents < 0) or np.any(agents >= self.num_agents):
             raise IndexError("agent_id out of range.")
         if np.any(tasks < 0) or np.any(tasks >= self.num_tasks):
@@ -188,6 +267,8 @@ class LocalBeliefBatch:
         before_aoi = self.aoi[agents, tasks].copy()
         before_demand_uncertainty = self.demand_uncertainties[agents, tasks].copy()
         before_demand_aoi = self.demand_aoi[agents, tasks].copy()
+        before_queue_uncertainty = self.queue_uncertainties[agents, tasks].copy()
+        before_queue_aoi = self.queue_aoi[agents, tasks].copy()
         before_quality = self._task_quality(agents, tasks)
         reduction = float(np.clip(uncertainty_reduction, 0.0, 1.0))
         demand_reduction = float(
@@ -206,6 +287,11 @@ class LocalBeliefBatch:
         self.demand_uncertainties[agents, tasks] = before_demand_uncertainty * (1.0 - demand_reduction)
         self.demand_aoi[agents, tasks] = 0.0
         self.demand_confidence[agents, tasks] = 1.0 - self.demand_uncertainties[agents, tasks]
+        self.queue_estimates[agents, tasks] = np.maximum(queue_values, 0.0)
+        self.queue_uncertainties[agents, tasks] = before_queue_uncertainty * (1.0 - demand_reduction)
+        self.queue_aoi[agents, tasks] = 0.0
+        self.queue_confidence[agents, tasks] = 1.0 - self.queue_uncertainties[agents, tasks]
+        self.arrival_estimates[agents, tasks] = np.maximum(arrival_values, 0.0)
         self.last_update_step[agents, tasks] = int(current_step)
 
         after_quality = self._task_quality(agents, tasks)
@@ -219,6 +305,14 @@ class LocalBeliefBatch:
             np.sum(weights * (before_demand_uncertainty - self.demand_uncertainties[agents, tasks])) / weight_sum
         )
         demand_aoi_gain = float(np.sum(weights * before_demand_aoi) / (weight_sum * self.max_aoi))
+        queue_uncertainty_gain = float(
+            np.sum(
+                weights
+                * (before_queue_uncertainty - self.queue_uncertainties[agents, tasks])
+            )
+            / weight_sum
+        )
+        queue_aoi_gain = float(np.sum(weights * before_queue_aoi) / (weight_sum * self.max_aoi))
         return {
             "uncertainty_gain": 0.5 * (spectrum_uncertainty_gain + demand_uncertainty_gain),
             "aoi_gain": 0.5 * (spectrum_aoi_gain + demand_aoi_gain),
@@ -226,6 +320,8 @@ class LocalBeliefBatch:
             "spectrum_aoi_gain": spectrum_aoi_gain,
             "demand_uncertainty_gain": demand_uncertainty_gain,
             "demand_aoi_gain": demand_aoi_gain,
+            "queue_uncertainty_gain": queue_uncertainty_gain,
+            "queue_aoi_gain": queue_aoi_gain,
             "information_gain": np.maximum(after_quality - before_quality, 0.0).astype(np.float32),
         }
 
@@ -396,6 +492,11 @@ class LocalBeliefBatch:
             demand_uncertainty=float(self.demand_uncertainties[agent_id, task_id]),
             demand_aoi=float(self.demand_aoi[agent_id, task_id]),
             demand_confidence=float(self.demand_confidence[agent_id, task_id]),
+            queue_estimate=float(self.queue_estimates[agent_id, task_id]),
+            queue_uncertainty=float(self.queue_uncertainties[agent_id, task_id]),
+            queue_aoi=float(self.queue_aoi[agent_id, task_id]),
+            queue_confidence=float(self.queue_confidence[agent_id, task_id]),
+            arrival_estimate=float(self.arrival_estimates[agent_id, task_id]),
             last_update_step=int(self.last_update_step[agent_id, task_id]),
         )
 
