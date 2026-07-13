@@ -393,6 +393,6 @@ git commit -m "feat: report dynamic service assurance metrics"
 ## Self-Review Checklist
 
 - Spec coverage: hidden dynamic truth, local queue beliefs, message fusion, service capacity, queue transition, reward, observation shape, metrics, compatibility, and legacy smoke tests are covered by Tasks 1-5.
-- Placeholder scan: no `TODO`, `TBD`, or unspecified implementation step is used.
+- Placeholder scan: all implementation steps contain concrete files, interfaces, commands, and expected results.
 - Type consistency: task truth methods operate on `[num_tasks]`; local beliefs and messages use `[num_agents, num_tasks]`; environment service output uses per-task and per-agent float arrays.
 - Scope: explicit user queues and bandwidth allocation are intentionally excluded from this implementation.
