@@ -139,6 +139,17 @@ class ScenarioConfig:
     cognition_service_energy_cost: float = 5.0
     cognition_scheduling_reward_weight: float = 4.0
     cognition_scheduling_conflict_penalty: float = 1.0
+    cognition_queue_capacity: float = 20.0
+    cognition_initial_queue_min: float = 0.0
+    cognition_initial_queue_max: float = 4.0
+    cognition_arrival_rate_min: float = 0.1
+    cognition_arrival_rate_max: float = 0.8
+    cognition_arrival_noise_std: float = 0.05
+    cognition_base_service_rate: float = 4.0
+    cognition_max_service_per_step: float = 4.0
+    cognition_queue_reward_weight: float = 1.0
+    cognition_service_reward_weight: float = 5.0
+    cognition_priority_service_weight: float = 2.0
 
     # =========================
     # Reward（ppo_main 基线原始 reward）
@@ -283,6 +294,25 @@ class ScenarioConfig:
         self.cognition_scheduling_conflict_penalty = float(
             max(self.cognition_scheduling_conflict_penalty, 0.0)
         )
+        self.cognition_queue_capacity = float(max(self.cognition_queue_capacity, 1.0))
+        self.cognition_initial_queue_min = float(max(self.cognition_initial_queue_min, 0.0))
+        self.cognition_initial_queue_max = float(
+            max(self.cognition_initial_queue_max, self.cognition_initial_queue_min)
+        )
+        self.cognition_arrival_rate_min = float(max(self.cognition_arrival_rate_min, 0.0))
+        self.cognition_arrival_rate_max = float(
+            max(self.cognition_arrival_rate_max, self.cognition_arrival_rate_min)
+        )
+        self.cognition_arrival_noise_std = float(max(self.cognition_arrival_noise_std, 0.0))
+        self.cognition_base_service_rate = float(max(self.cognition_base_service_rate, 0.0))
+        self.cognition_max_service_per_step = float(
+            max(self.cognition_max_service_per_step, 1e-6)
+        )
+        self.cognition_queue_reward_weight = float(max(self.cognition_queue_reward_weight, 0.0))
+        self.cognition_service_reward_weight = float(max(self.cognition_service_reward_weight, 0.0))
+        self.cognition_priority_service_weight = float(
+            max(self.cognition_priority_service_weight, 0.0)
+        )
         self.reward_weight_uncertainty_gain = float(max(self.reward_weight_uncertainty_gain, 0.0))
         self.reward_weight_aoi_gain = float(max(self.reward_weight_aoi_gain, 0.0))
         self.reward_weight_repeat_sensing_penalty = float(max(self.reward_weight_repeat_sensing_penalty, 0.0))
@@ -420,6 +450,27 @@ class ScenarioConfig:
 
         if self.cognition_max_task_slots <= 0:
             raise ValueError("cognition_max_task_slots must be positive.")
+
+        if self.cognition_queue_capacity <= 0:
+            raise ValueError("cognition_queue_capacity must be positive.")
+
+        if self.cognition_initial_queue_min < 0.0:
+            raise ValueError("cognition_initial_queue_min must be non-negative.")
+
+        if self.cognition_initial_queue_max < self.cognition_initial_queue_min:
+            raise ValueError("cognition_initial_queue_max must not be below the minimum.")
+
+        if self.cognition_arrival_rate_min < 0.0:
+            raise ValueError("cognition_arrival_rate_min must be non-negative.")
+
+        if self.cognition_arrival_rate_max < self.cognition_arrival_rate_min:
+            raise ValueError("cognition_arrival_rate_max must not be below the minimum.")
+
+        if self.cognition_base_service_rate < 0.0:
+            raise ValueError("cognition_base_service_rate must be non-negative.")
+
+        if self.cognition_max_service_per_step <= 0.0:
+            raise ValueError("cognition_max_service_per_step must be positive.")
 
         if self.cognition_communication_radius <= 0:
             raise ValueError("cognition_communication_radius must be positive.")

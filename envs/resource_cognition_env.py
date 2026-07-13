@@ -70,6 +70,16 @@ class ResourceCognitionEnv:
         demand_levels = self.rng.beta(
             2.0, 2.0, size=self.cfg.num_cognition_tasks
         ).astype(np.float32)
+        arrival_rates = self.rng.uniform(
+            self.cfg.cognition_arrival_rate_min,
+            self.cfg.cognition_arrival_rate_max,
+            size=self.cfg.num_cognition_tasks,
+        ).astype(np.float32)
+        initial_queues = self.rng.uniform(
+            self.cfg.cognition_initial_queue_min,
+            self.cfg.cognition_initial_queue_max,
+            size=self.cfg.num_cognition_tasks,
+        ).astype(np.float32)
         priorities = self.rng.uniform(
             self.cfg.task_priority_min,
             self.cfg.task_priority_max,
@@ -81,6 +91,9 @@ class ResourceCognitionEnv:
             true_states=true_states,
             demand_levels=demand_levels,
             priorities=priorities,
+            arrival_rates=arrival_rates,
+            queue_lengths=initial_queues,
+            queue_capacity=self.cfg.cognition_queue_capacity,
         )
         self.local_beliefs = LocalBeliefBatch(
             num_agents=self.num_agents,
@@ -137,6 +150,8 @@ class ResourceCognitionEnv:
         self.current_step += 1
         move_distances = self._apply_movement(action_array)
         beliefs.age(self.cfg.cognition_aoi_increment)
+        business_arrivals = self._sample_business_arrivals()
+        arrival_stats = truth.advance_business(business_arrivals)
         quality_before_sensing = self._per_agent_quality()
 
         if sensing_tasks.size:
@@ -152,14 +167,25 @@ class ResourceCognitionEnv:
                 size=sensing_tasks.shape,
             ).astype(np.float32)
             demand_observations = truth.demand_levels[sensing_tasks] + demand_noise
+            queue_noise = self.rng.normal(
+                0.0,
+                self.cfg.cognition_arrival_noise_std,
+                size=sensing_tasks.shape,
+            ).astype(np.float32)
+            queue_observations = truth.queue_lengths[sensing_tasks] + queue_noise
+            arrival_observations = truth.arrival_rates[sensing_tasks] + queue_noise
         else:
             observations = np.zeros((0,), dtype=np.float32)
             demand_observations = np.zeros((0,), dtype=np.float32)
+            queue_observations = np.zeros((0,), dtype=np.float32)
+            arrival_observations = np.zeros((0,), dtype=np.float32)
         sensing_gain = beliefs.apply_local_sensing(
             sensing_agents,
             sensing_tasks,
             observations,
             demand_observations=demand_observations,
+            queue_observations=queue_observations,
+            arrival_observations=arrival_observations,
             uncertainty_reduction=self.cfg.cognition_task_uncertainty_reduction,
             demand_uncertainty_reduction=self.cfg.cognition_demand_uncertainty_reduction,
             current_step=self.current_step,
@@ -215,6 +241,15 @@ class ResourceCognitionEnv:
         fusion_reward = (
             self.cfg.cognition_fusion_reward_weight * float(fusion_stats["quality_gain"])
         )
+        service_reward = (
+            self.cfg.cognition_service_reward_weight
+            * float(scheduling_stats["served_data"])
+            / max(float(len(truth) * self.cfg.cognition_max_service_per_step), 1e-6)
+        )
+        queue_backlog_penalty = (
+            self.cfg.cognition_queue_reward_weight
+            * float(np.mean(truth.queue_lengths / self.cfg.cognition_queue_capacity))
+        )
         shared_reward = float(
             self.cfg.reward_weight_uncertainty_gain * sensing_gain["uncertainty_gain"]
             + self.cfg.reward_weight_aoi_gain * sensing_gain["aoi_gain"]
@@ -222,8 +257,12 @@ class ResourceCognitionEnv:
             + self.cfg.cognition_scheduling_reward_weight
             * len(truth)
             * scheduling_stats["team_utility"]
+            + service_reward
+            + self.cfg.cognition_priority_service_weight
+            * scheduling_stats["high_priority_service_rate"]
             - scheduling_stats["energy_penalty"]
             - scheduling_stats["conflict_penalty"]
+            - queue_backlog_penalty
             - sensing_cost
             - repeat_penalty
             - communication_penalty
@@ -309,7 +348,7 @@ class ResourceCognitionEnv:
                 "communication_penalty": float(communication_penalty),
                 "fusion_gain": float(fusion_stats["quality_gain"]),
                 "fusion_reward": float(fusion_reward),
-                "scheduled_task_count": int(scheduling_stats["scheduled_count"]),
+            "scheduled_task_count": int(scheduling_stats["scheduled_count"]),
                 "scheduling_team_utility": float(scheduling_stats["team_utility"]),
                 "scheduling_estimated_utility": float(
                     scheduling_stats["estimated_team_utility"]
@@ -329,6 +368,23 @@ class ResourceCognitionEnv:
                 "scheduling_energy_penalty": float(
                     scheduling_stats["energy_penalty"]
                 ),
+                "total_arrivals": float(arrival_stats["total_arrivals"]),
+                "queue_overflow": float(arrival_stats["queue_overflow"]),
+                "total_queue_length": float(np.sum(truth.queue_lengths)),
+                "scheduling_served_data": float(scheduling_stats["served_data"]),
+                "service_rate": float(scheduling_stats["service_rate"]),
+                "weighted_demand_satisfaction": float(
+                    scheduling_stats["weighted_demand_satisfaction"]
+                ),
+                "high_priority_service_rate": float(
+                    scheduling_stats["high_priority_service_rate"]
+                ),
+                "service_energy_consumption": float(
+                    scheduling_stats["energy_consumption"]
+                ),
+                "per_agent_served_data": scheduling_stats["service_by_agent"].copy(),
+                "service_reward": float(service_reward),
+                "queue_backlog_penalty": float(queue_backlog_penalty),
                 "per_agent_scheduling_difference": scheduling_stats[
                     "difference_by_agent"
                 ].copy(),
@@ -569,6 +625,17 @@ class ResourceCognitionEnv:
                             beliefs.demand_confidence[sender_id, task_id]
                         ),
                         demand_aoi=float(beliefs.demand_aoi[sender_id, task_id]),
+                        queue_estimate=float(beliefs.queue_estimates[sender_id, task_id]),
+                        queue_uncertainty=float(
+                            beliefs.queue_uncertainties[sender_id, task_id]
+                        ),
+                        queue_confidence=float(
+                            beliefs.queue_confidence[sender_id, task_id]
+                        ),
+                        queue_aoi=float(beliefs.queue_aoi[sender_id, task_id]),
+                        arrival_estimate=float(
+                            beliefs.arrival_estimates[sender_id, task_id]
+                        ),
                     )
                 )
         return messages
@@ -596,6 +663,11 @@ class ResourceCognitionEnv:
                 demand_uncertainty=message.demand_uncertainty,
                 demand_confidence=message.demand_confidence,
                 demand_aoi=message.demand_aoi,
+                queue_estimate=message.queue_estimate,
+                queue_uncertainty=message.queue_uncertainty,
+                queue_confidence=message.queue_confidence,
+                queue_aoi=message.queue_aoi,
+                arrival_estimate=message.arrival_estimate,
                 source_update_step=message.created_step,
                 current_step=self.current_step,
                 confidence_threshold=self.cfg.cognition_fusion_confidence_threshold,
@@ -629,29 +701,57 @@ class ResourceCognitionEnv:
         schedule_agents: np.ndarray,
         schedule_tasks: np.ndarray,
     ) -> Dict[str, Any]:
+        truth, _ = self._require_state()
         assignments = np.full((self.num_agents,), -1, dtype=np.int64)
         if self.cfg.cognition_enable_scheduling and schedule_tasks.size:
             assignments[schedule_agents] = schedule_tasks
 
-        team_utility, service_by_agent, conflict_counts = self._evaluate_schedule(
+        team_utility, service_by_agent, conflict_counts, capacity_by_agent = self._evaluate_schedule(
             assignments, use_truth=True
         )
-        estimated_utility, _, _ = self._evaluate_schedule(
+        estimated_utility, _, _, _ = self._evaluate_schedule(
             assignments, use_truth=False
         )
         difference_by_agent = np.zeros((self.num_agents,), dtype=np.float32)
         for agent_id in np.flatnonzero(assignments >= 0):
             counterfactual = assignments.copy()
             counterfactual[agent_id] = -1
-            counterfactual_utility, _, _ = self._evaluate_schedule(
+            counterfactual_utility, _, _, _ = self._evaluate_schedule(
                 counterfactual, use_truth=True
             )
             difference_by_agent[agent_id] = max(
                 float(team_utility - counterfactual_utility), 0.0
             )
 
+        queue_before = truth.queue_lengths.copy()
+        served_by_task = np.zeros((len(truth),), dtype=np.float32)
+        for agent_id in np.flatnonzero(assignments >= 0):
+            served_by_task[int(assignments[agent_id])] += service_by_agent[agent_id]
+        served_data = truth.apply_service(served_by_task)
+        satisfaction_by_task = np.divide(
+            served_by_task,
+            np.maximum(queue_before, 1e-6),
+            out=np.zeros_like(served_by_task),
+            where=queue_before > 1e-6,
+        )
+        priority_weights = truth.priorities
+        weighted_demand_satisfaction = float(
+            np.sum(priority_weights * satisfaction_by_task)
+            / max(float(np.sum(priority_weights)), 1e-6)
+        )
+        high_priority = priority_weights >= np.percentile(priority_weights, 75.0)
+        high_priority_service_rate = float(
+            np.mean(satisfaction_by_task[high_priority])
+            if np.any(high_priority) else 0.0
+        )
+        service_rate = float(
+            np.clip(served_data / max(float(np.sum(queue_before)), 1e-6), 0.0, 1.0)
+        )
+
         energy_consumption_by_agent = np.zeros((self.num_agents,), dtype=np.float32)
         for agent_id in np.flatnonzero(assignments >= 0):
+            if service_by_agent[agent_id] <= 1e-6:
+                continue
             consumed = min(
                 float(self.cfg.cognition_service_energy_cost),
                 float(self.remaining_time[agent_id]),
@@ -674,6 +774,12 @@ class ResourceCognitionEnv:
             "team_utility": float(team_utility),
             "estimated_team_utility": float(estimated_utility),
             "service_by_agent": service_by_agent,
+            "capacity_by_agent": capacity_by_agent,
+            "served_by_task": served_by_task,
+            "served_data": float(served_data),
+            "service_rate": service_rate,
+            "weighted_demand_satisfaction": weighted_demand_satisfaction,
+            "high_priority_service_rate": high_priority_service_rate,
             "difference_by_agent": difference_by_agent,
             "scheduled_task_by_agent": assignments,
             "scheduled_count": int(np.count_nonzero(assignments >= 0)),
@@ -687,12 +793,32 @@ class ResourceCognitionEnv:
             "energy_penalty": float(np.mean(energy_penalty_by_agent)),
         }
 
+    def _sample_business_arrivals(self) -> np.ndarray:
+        truth, _ = self._require_state()
+        demand_noise = self.rng.normal(
+            0.0,
+            self.cfg.cognition_arrival_noise_std,
+            size=truth.demand_levels.shape,
+        ).astype(np.float32)
+        truth.demand_levels[:] = np.clip(
+            truth.demand_levels + demand_noise,
+            0.0,
+            1.0,
+        )
+        expected = truth.arrival_rates * (0.5 + truth.demand_levels)
+        arrival_noise = self.rng.normal(
+            0.0,
+            self.cfg.cognition_arrival_noise_std,
+            size=expected.shape,
+        ).astype(np.float32)
+        return np.maximum(expected + arrival_noise, 0.0).astype(np.float32)
+
     def _evaluate_schedule(
         self,
         assignments: np.ndarray,
         *,
         use_truth: bool,
-    ) -> Tuple[float, np.ndarray, np.ndarray]:
+    ) -> Tuple[float, np.ndarray, np.ndarray, np.ndarray]:
         truth, beliefs = self._require_state()
         assignments = np.asarray(assignments, dtype=np.int64)
         conflict_counts = np.zeros((self.num_agents,), dtype=np.float32)
@@ -711,15 +837,7 @@ class ResourceCognitionEnv:
                     conflict_counts[agent_id] += 1.0
                     conflict_counts[other_id] += 1.0
 
-        if use_truth:
-            demand = truth.demand_levels
-            availability = 1.0 - truth.true_states
-            weights = truth.priorities
-        else:
-            demand = beliefs.demand_estimates
-            availability = 1.0 - beliefs.estimates
-            weights = np.ones((len(truth),), dtype=np.float32)
-
+        capacity_by_agent = np.zeros((self.num_agents,), dtype=np.float32)
         service_by_agent = np.zeros((self.num_agents,), dtype=np.float32)
         for agent_id in assigned_agents:
             task_id = int(assignments[agent_id])
@@ -739,29 +857,55 @@ class ResourceCognitionEnv:
                     1.0,
                 )
             )
-            conflict_factor = 1.0 / (1.0 + float(conflict_counts[agent_id]))
-            demand_value = (
-                demand[task_id]
-                if use_truth
-                else demand[agent_id, task_id]
-            )
             availability_value = (
-                availability[task_id]
+                1.0 - float(truth.true_states[task_id])
                 if use_truth
-                else availability[agent_id, task_id]
+                else 1.0 - float(beliefs.estimates[agent_id, task_id])
             )
-            service_by_agent[agent_id] = float(
-                weights[task_id]
-                * np.clip(demand_value, 0.0, 1.0)
-                * np.clip(availability_value, 0.0, 1.0)
+            raw_capacity = (
+                self.cfg.cognition_base_service_rate
                 * link_quality
+                * np.clip(availability_value, 0.0, 1.0)
                 * energy_factor
-                * conflict_factor
             )
+            capacity_by_agent[agent_id] = float(
+                min(raw_capacity, self.cfg.cognition_max_service_per_step)
+            )
+
+        effective_capacity = capacity_by_agent / (1.0 + conflict_counts)
+        for task_id in np.unique(assignments[assigned_agents]):
+            task_agents = assigned_agents[assignments[assigned_agents] == task_id]
+            total_capacity = float(np.sum(effective_capacity[task_agents]))
+            queue_value = (
+                float(truth.queue_lengths[task_id])
+                if use_truth
+                else float(np.max(beliefs.queue_estimates[:, task_id]))
+            )
+            actual_service = min(max(queue_value, 0.0), total_capacity)
+            if total_capacity > 1e-6:
+                service_by_agent[task_agents] = (
+                    effective_capacity[task_agents] / total_capacity * actual_service
+                )
+
+        if use_truth:
+            queues = truth.queue_lengths
+            weights = truth.priorities
+        else:
+            queues = np.max(beliefs.queue_estimates, axis=0)
+            weights = np.ones((len(truth),), dtype=np.float32)
+        served_by_task = np.zeros((len(truth),), dtype=np.float32)
+        for agent_id in assigned_agents:
+            served_by_task[int(assignments[agent_id])] += service_by_agent[agent_id]
         utility = float(
-            np.sum(service_by_agent) / max(float(np.sum(weights)), 1e-6)
+            np.sum(weights * np.divide(
+                served_by_task,
+                np.maximum(queues, 1e-6),
+                out=np.zeros_like(served_by_task),
+                where=queues > 1e-6,
+            ))
+            / max(float(np.sum(weights[queues > 1e-6])), 1e-6)
         )
-        return utility, service_by_agent, conflict_counts
+        return utility, service_by_agent, conflict_counts, capacity_by_agent
 
     def _init_uavs(self) -> None:
         if self.cfg.uav_init_mode == "circle":

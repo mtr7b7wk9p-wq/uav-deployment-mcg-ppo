@@ -2,6 +2,8 @@ import numpy as np
 import unittest
 
 from envs.task_model import LocalBeliefBatch, TaskTruthBatch
+from configs.scenario_config import ScenarioConfig
+from envs.resource_cognition_env import ResourceCognitionEnv
 
 
 def make_truth(queue_lengths, queue_capacity=10.0):
@@ -22,6 +24,21 @@ def make_beliefs(num_agents=2, num_tasks=1):
     return LocalBeliefBatch(
         num_agents=num_agents,
         task_priorities=np.ones(num_tasks, dtype=np.float32),
+    )
+
+
+def make_env(num_tasks=2, max_steps=5):
+    return ResourceCognitionEnv(
+        ScenarioConfig(
+            use_resource_cognition=True,
+            max_candidate_uavs=2,
+            num_uavs=2,
+            num_cognition_tasks=num_tasks,
+            cognition_max_task_slots=num_tasks,
+            max_obs_uavs=1,
+            max_steps=max_steps,
+            uav_init_mode="center",
+        )
     )
 
 
@@ -64,3 +81,30 @@ class DynamicBusinessQueueTests(unittest.TestCase):
         self.assertEqual(result["queue_accepted"], 1.0)
         self.assertNotEqual(beliefs.queue_estimates[1, 0], before)
         self.assertGreater(beliefs.queue_estimates[1, 0], 0.0)
+
+    def test_scheduling_reduces_queue_and_reports_service_rate(self):
+        env = make_env()
+        env.reset(seed=7)
+        env.task_truth.queue_lengths[:] = [8.0, 0.0]
+        env.task_truth.arrival_rates[:] = 0.0
+        stats = env._execute_scheduling(
+            np.array([0], dtype=np.int64),
+            np.array([0], dtype=np.int64),
+        )
+        self.assertGreater(stats["served_data"], 0.0)
+        self.assertLess(env.task_truth.queue_lengths[0], 8.0)
+        self.assertGreater(stats["service_rate"], 0.0)
+        self.assertLessEqual(stats["service_rate"], 1.0)
+
+    def test_same_band_conflict_reduces_service(self):
+        env = make_env()
+        env.reset(seed=8)
+        env.task_truth.band_ids[:] = 0
+        env.task_truth.queue_lengths[:] = 8.0
+        env.task_truth.positions_xy[1] = env.task_truth.positions_xy[0]
+        stats = env._execute_scheduling(
+            np.array([0, 1], dtype=np.int64),
+            np.array([0, 1], dtype=np.int64),
+        )
+        self.assertGreater(stats["conflict_count"], 0)
+        self.assertLess(stats["service_by_agent"][0], stats["capacity_by_agent"][0])
