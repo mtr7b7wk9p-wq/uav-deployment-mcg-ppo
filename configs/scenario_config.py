@@ -364,7 +364,13 @@ class ScenarioConfig:
         return self.get_ppo_main_local_obs_dim()
 
     def get_resource_cognition_local_obs_dim(self) -> int:
-        return int(6 + self.cognition_max_task_slots * 12 + self.max_obs_uavs * 12)
+        task_slot_dim = 17
+        message_slot_dim = 17
+        return int(
+            6
+            + self.cognition_max_task_slots * task_slot_dim
+            + self.max_obs_uavs * message_slot_dim
+        )
 
     def get_resource_cognition_action_dim(self) -> int:
         """Movement, sensing, and optional scheduling actions per local slot."""

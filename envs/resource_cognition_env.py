@@ -23,6 +23,8 @@ class ResourceCognitionEnv:
 
     MOVE_ACTIONS = 5
     SENSE_ACTION_START = MOVE_ACTIONS
+    TASK_SLOT_DIM = 17
+    MESSAGE_SLOT_DIM = 17
 
     def __init__(self, config: Optional[ScenarioConfig] = None):
         self.cfg = config or ScenarioConfig(use_resource_cognition=True)
@@ -452,7 +454,10 @@ class ResourceCognitionEnv:
             ],
             dtype=np.float32,
         )
-        task_features = np.zeros((self.cfg.cognition_max_task_slots, 12), dtype=np.float32)
+        task_features = np.zeros(
+            (self.cfg.cognition_max_task_slots, self.TASK_SLOT_DIM),
+            dtype=np.float32,
+        )
         for slot, task_id in enumerate(visible):
             rel = truth.positions_xy[task_id] - position
             link_quality = float(np.exp(-distances[task_id] / max(self.cfg.sensing_radius, 1e-6)))
@@ -470,11 +475,21 @@ class ResourceCognitionEnv:
                     beliefs.demand_aoi[i, task_id] / max(self.cfg.task_max_aoi, 1e-6),
                     beliefs.demand_confidence[i, task_id],
                     link_quality,
+                    beliefs.queue_estimates[i, task_id]
+                    / max(self.cfg.cognition_queue_capacity, 1e-6),
+                    beliefs.queue_uncertainties[i, task_id],
+                    beliefs.queue_aoi[i, task_id] / max(self.cfg.task_max_aoi, 1e-6),
+                    beliefs.queue_confidence[i, task_id],
+                    beliefs.arrival_estimates[i, task_id]
+                    / max(self.cfg.cognition_arrival_rate_max, 1e-6),
                 ],
                 dtype=np.float32,
             )
 
-        neighbor_features = np.zeros((self.cfg.max_obs_uavs, 12), dtype=np.float32)
+        neighbor_features = np.zeros(
+            (self.cfg.max_obs_uavs, self.MESSAGE_SLOT_DIM),
+            dtype=np.float32,
+        )
         received = [
             (sender_id, message, accepted)
             for sender_id, (message, accepted) in self._received_message_cache[i].items()
@@ -500,6 +515,13 @@ class ResourceCognitionEnv:
                 message.demand_confidence,
                 min(max(message.demand_aoi, 0.0), self.cfg.task_max_aoi)
                 / max(self.cfg.task_max_aoi, 1e-6),
+                message.queue_estimate / max(self.cfg.cognition_queue_capacity, 1e-6),
+                message.queue_uncertainty,
+                message.queue_confidence,
+                min(max(message.queue_aoi, 0.0), self.cfg.task_max_aoi)
+                / max(self.cfg.task_max_aoi, 1e-6),
+                message.arrival_estimate
+                / max(self.cfg.cognition_arrival_rate_max, 1e-6),
                 1.0 if accepted else 0.0,
                 1.0,
             ]
@@ -1037,7 +1059,11 @@ class ResourceCognitionEnv:
         }
 
     def _compute_local_obs_dim(self) -> int:
-        return int(6 + self.cfg.cognition_max_task_slots * 12 + self.cfg.max_obs_uavs * 12)
+        return int(
+            6
+            + self.cfg.cognition_max_task_slots * self.TASK_SLOT_DIM
+            + self.cfg.max_obs_uavs * self.MESSAGE_SLOT_DIM
+        )
 
     def _require_state(self) -> Tuple[TaskTruthBatch, LocalBeliefBatch]:
         if self.task_truth is None or self.local_beliefs is None:

@@ -567,8 +567,8 @@ class ResourceCognitionObsSliceSpec:
     num_task_slots: int
     num_message_slots: int
     self_dim: int = 6
-    task_slot_dim: int = 12
-    message_slot_dim: int = 12
+    task_slot_dim: int = 17
+    message_slot_dim: int = 17
 
     @property
     def expected_dim(self) -> int:

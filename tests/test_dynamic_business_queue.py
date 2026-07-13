@@ -4,6 +4,7 @@ import unittest
 from envs.task_model import LocalBeliefBatch, TaskTruthBatch
 from configs.scenario_config import ScenarioConfig
 from envs.resource_cognition_env import ResourceCognitionEnv
+from agents.ppo.models import ResourceCognitionObsSliceSpec
 
 
 def make_truth(queue_lengths, queue_capacity=10.0):
@@ -108,3 +109,24 @@ class DynamicBusinessQueueTests(unittest.TestCase):
         )
         self.assertGreater(stats["conflict_count"], 0)
         self.assertLess(stats["service_by_agent"][0], stats["capacity_by_agent"][0])
+
+    def test_dynamic_queue_observation_has_fixed_dimension_without_truth_leak(self):
+        env = make_env(num_tasks=2, max_steps=3)
+        first = env.reset(seed=9)["local_obs"].copy()
+        expected_dim = 6 + 17 * env.cfg.cognition_max_task_slots + 17 * env.cfg.max_obs_uavs
+        self.assertEqual(first.shape[-1], expected_dim)
+        env.task_truth.queue_lengths[:] = 10.0
+        second = env.get_local_obs(0)
+        self.assertEqual(second.shape, first[0].shape)
+        self.assertTrue(np.allclose(second, first[0]))
+
+    def test_structured_encoder_uses_dynamic_slot_dimensions(self):
+        env = make_env(num_tasks=2)
+        spec = ResourceCognitionObsSliceSpec(
+            local_obs_dim=env.local_obs_dim,
+            num_task_slots=env.cfg.cognition_max_task_slots,
+            num_message_slots=env.cfg.max_obs_uavs,
+        )
+        self.assertEqual(spec.task_slot_dim, 17)
+        self.assertEqual(spec.message_slot_dim, 17)
+        self.assertEqual(spec.expected_dim, env.local_obs_dim)
