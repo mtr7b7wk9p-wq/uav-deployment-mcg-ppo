@@ -53,6 +53,9 @@ class ResourceCognitionEnv:
         self._last_interference_power_by_agent = np.zeros(
             (self.num_agents,), dtype=np.float32
         )
+        self._last_raw_capacity_by_agent = np.zeros(
+            (self.num_agents,), dtype=np.float32
+        )
         self._last_info: Dict[str, Any] = {}
 
     def reset(self, seed: Optional[int] = None) -> Dict[str, Any]:
@@ -124,6 +127,7 @@ class ResourceCognitionEnv:
         self.remaining_time[:] = self.cfg.uav_max_time
         self.total_distance_per_uav[:] = 0.0
         self._last_interference_power_by_agent[:] = 0.0
+        self._last_raw_capacity_by_agent[:] = 0.0
         self._last_info = self._build_info(
             reward=0.0,
             uncertainty_gain=0.0,
@@ -146,7 +150,9 @@ class ResourceCognitionEnv:
             raise ValueError("action out of range.")
 
         sensing_agents, sensing_tasks = self._decode_sensing_actions(action_array)
-        schedule_agents, schedule_tasks = self._decode_schedule_actions(action_array)
+        schedule_agents, schedule_tasks, schedule_levels = self._decode_schedule_actions(
+            action_array
+        )
         repeat_cost_units = np.zeros((self.num_agents,), dtype=np.float32)
         if sensing_tasks.size:
             unique_tasks, task_counts = np.unique(sensing_tasks, return_counts=True)
@@ -238,7 +244,11 @@ class ResourceCognitionEnv:
                 "accepted_by_sender"
             ]
 
-        scheduling_stats = self._execute_scheduling(schedule_agents, schedule_tasks)
+        scheduling_stats = self._execute_scheduling(
+            schedule_agents,
+            schedule_tasks,
+            schedule_levels,
+        )
 
         repeat_ratio = float(repeat_count / max(len(truth), 1))
         active_count = max(int(np.sum(self.active_mask)), 1)
@@ -399,6 +409,18 @@ class ResourceCognitionEnv:
                 "mean_service_capacity": float(
                     scheduling_stats["mean_service_capacity"]
                 ),
+                "mean_raw_service_capacity": float(
+                    scheduling_stats["mean_raw_service_capacity"]
+                ),
+                "capacity_clip_ratio": float(
+                    scheduling_stats["capacity_clip_ratio"]
+                ),
+                "capacity_clipped_count": int(
+                    scheduling_stats["capacity_clipped_count"]
+                ),
+                "mean_resource_level": float(
+                    scheduling_stats["mean_resource_level"]
+                ),
                 "service_outage_count": int(
                     scheduling_stats["service_outage_count"]
                 ),
@@ -416,6 +438,9 @@ class ResourceCognitionEnv:
                 ].copy(),
                 "per_agent_scheduled_task": scheduling_stats[
                     "scheduled_task_by_agent"
+                ].copy(),
+                "per_agent_resource_level": scheduling_stats[
+                    "resource_level_by_agent"
                 ].copy(),
                 "shared_resource_reward": float(shared_reward),
                 "sensing_difference_mean": float(np.mean(sensing_difference)),
@@ -582,10 +607,34 @@ class ResourceCognitionEnv:
     def _decode_sensing_actions(self, actions: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         return self._decode_task_actions(actions, self.SENSE_ACTION_START)
 
-    def _decode_schedule_actions(self, actions: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def _decode_schedule_actions(
+        self,
+        actions: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         if not self.cfg.cognition_enable_scheduling:
-            return np.zeros((0,), dtype=np.int64), np.zeros((0,), dtype=np.int64)
-        return self._decode_task_actions(actions, self._schedule_action_start())
+            empty = np.zeros((0,), dtype=np.int64)
+            return empty, empty.copy(), empty.copy()
+
+        agent_ids: List[int] = []
+        task_ids: List[int] = []
+        resource_levels: List[int] = []
+        slots_per_level = self.cfg.cognition_max_task_slots
+        num_levels = len(self.cfg.cognition_resource_level_factors)
+        for agent_id, action in enumerate(actions):
+            relative_action = int(action) - self._schedule_action_start()
+            if relative_action < 0:
+                continue
+            level, slot = divmod(relative_action, slots_per_level)
+            if level >= num_levels or slot >= len(self._slot_task_indices[agent_id]):
+                continue
+            agent_ids.append(agent_id)
+            task_ids.append(int(self._slot_task_indices[agent_id][slot]))
+            resource_levels.append(level)
+        return (
+            np.asarray(agent_ids, dtype=np.int64),
+            np.asarray(task_ids, dtype=np.int64),
+            np.asarray(resource_levels, dtype=np.int64),
+        )
 
     def _decode_task_actions(
         self,
@@ -746,34 +795,57 @@ class ResourceCognitionEnv:
         self,
         schedule_agents: np.ndarray,
         schedule_tasks: np.ndarray,
+        resource_levels: Optional[np.ndarray] = None,
     ) -> Dict[str, Any]:
         truth, _ = self._require_state()
         assignments = np.full((self.num_agents,), -1, dtype=np.int64)
+        selected_levels = np.ones((self.num_agents,), dtype=np.int64)
+        if resource_levels is not None:
+            resource_levels = np.asarray(resource_levels, dtype=np.int64)
+            if resource_levels.shape == (self.num_agents,):
+                selected_levels[:] = resource_levels
+            elif resource_levels.shape == schedule_tasks.shape:
+                selected_levels[schedule_agents] = resource_levels
+            else:
+                raise ValueError(
+                    "resource_levels must match all agents or scheduled agents."
+                )
+        if np.any(selected_levels < 0) or np.any(
+            selected_levels >= len(self.cfg.cognition_resource_level_factors)
+        ):
+            raise ValueError("resource_levels contain an unknown resource level.")
         if self.cfg.cognition_enable_scheduling and schedule_tasks.size:
             assignments[schedule_agents] = schedule_tasks
 
         team_utility, service_by_agent, conflict_counts, capacity_by_agent = self._evaluate_schedule(
-            assignments, use_truth=True
+            assignments,
+            use_truth=True,
+            resource_levels=selected_levels,
         )
         estimated_utility, _, _, _ = self._evaluate_schedule(
-            assignments, use_truth=False
+            assignments,
+            use_truth=False,
+            resource_levels=selected_levels,
         )
         difference_by_agent = np.zeros((self.num_agents,), dtype=np.float32)
         for agent_id in np.flatnonzero(assignments >= 0):
             counterfactual = assignments.copy()
             counterfactual[agent_id] = -1
             counterfactual_utility, _, _, _ = self._evaluate_schedule(
-                counterfactual, use_truth=True
+                counterfactual,
+                use_truth=True,
+                resource_levels=selected_levels,
             )
             difference_by_agent[agent_id] = max(
                 float(team_utility - counterfactual_utility), 0.0
             )
 
-        _, sinr_by_agent, path_loss_by_agent, outage_by_agent = (
+        capacity_by_agent, sinr_by_agent, path_loss_by_agent, outage_by_agent, raw_capacity_by_agent = (
             self._physical_service_capacity(
                 assignments,
                 conflict_counts,
                 use_truth=True,
+                resource_levels=selected_levels,
             )
         )
         scheduled_count = max(int(np.count_nonzero(assignments >= 0)), 1)
@@ -783,6 +855,20 @@ class ResourceCognitionEnv:
         )
         mean_sinr = float(np.sum(sinr_by_agent) / scheduled_count)
         mean_service_capacity = float(np.sum(capacity_by_agent) / scheduled_count)
+        mean_raw_service_capacity = float(
+            np.sum(raw_capacity_by_agent) / scheduled_count
+        )
+        capacity_clipped = np.maximum(raw_capacity_by_agent - capacity_by_agent, 0.0)
+        capacity_clip_ratio = float(
+            np.sum(capacity_clipped[scheduled_mask])
+            / max(float(np.sum(raw_capacity_by_agent[scheduled_mask])), 1e-6)
+        )
+        capacity_clipped_count = int(
+            np.count_nonzero(capacity_clipped[scheduled_mask] > 1e-6)
+        )
+        mean_resource_level = float(
+            np.sum(selected_levels[scheduled_mask]) / scheduled_count
+        )
         service_outage_count = int(np.sum(outage_by_agent))
         service_outage_rate = float(service_outage_count / scheduled_count)
         total_interference_power_w = float(
@@ -847,6 +933,11 @@ class ResourceCognitionEnv:
             "mean_path_loss_db": mean_path_loss_db,
             "mean_sinr": mean_sinr,
             "mean_service_capacity": mean_service_capacity,
+            "mean_raw_service_capacity": mean_raw_service_capacity,
+            "capacity_clip_ratio": capacity_clip_ratio,
+            "capacity_clipped_count": capacity_clipped_count,
+            "resource_level_by_agent": selected_levels,
+            "mean_resource_level": mean_resource_level,
             "service_outage_count": service_outage_count,
             "service_outage_rate": service_outage_rate,
             "total_interference_power_w": total_interference_power_w,
@@ -894,7 +985,8 @@ class ResourceCognitionEnv:
         conflict_counts: np.ndarray,
         *,
         use_truth: bool,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        resource_levels: Optional[np.ndarray] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         truth, beliefs = self._require_state()
         assignments = np.asarray(assignments, dtype=np.int64)
         conflict_counts = np.asarray(conflict_counts, dtype=np.float32)
@@ -902,6 +994,16 @@ class ResourceCognitionEnv:
             raise ValueError("assignments must match the number of agents.")
         if conflict_counts.shape != (self.num_agents,):
             raise ValueError("conflict_counts must match the number of agents.")
+        if resource_levels is None:
+            resource_levels = np.ones((self.num_agents,), dtype=np.int64)
+        else:
+            resource_levels = np.asarray(resource_levels, dtype=np.int64)
+            if resource_levels.shape != (self.num_agents,):
+                raise ValueError("resource_levels must match the number of agents.")
+        if np.any(resource_levels < 0) or np.any(
+            resource_levels >= len(self.cfg.cognition_resource_level_factors)
+        ):
+            raise ValueError("resource_levels contain an unknown resource level.")
 
         channel_cfg = AirToGroundChannelConfig(
             mode="paper_atg",
@@ -919,6 +1021,7 @@ class ResourceCognitionEnv:
         gain_matrix = channel_gain_from_path_loss_db(path_loss_matrix)
         assigned_agents = np.flatnonzero(assignments >= 0)
         capacity_by_agent = np.zeros((self.num_agents,), dtype=np.float32)
+        raw_capacity_by_agent = np.zeros((self.num_agents,), dtype=np.float32)
         sinr_by_agent = np.zeros((self.num_agents,), dtype=np.float32)
         path_loss_by_agent = np.zeros((self.num_agents,), dtype=np.float32)
         outage_by_agent = np.zeros((self.num_agents,), dtype=bool)
@@ -957,7 +1060,8 @@ class ResourceCognitionEnv:
             )
             rate_mbps = float(
                 shannon_rate_mbps(
-                    self.cfg.cognition_bandwidth_mhz,
+                    self.cfg.cognition_bandwidth_mhz
+                    * self.cfg.cognition_resource_level_factors[resource_levels[agent_id]],
                     np.asarray([sinr], dtype=np.float32),
                 )[0]
             )
@@ -979,6 +1083,7 @@ class ResourceCognitionEnv:
             if outage:
                 capacity = 0.0
 
+            raw_capacity_by_agent[agent_id] = float(max(capacity, 0.0))
             capacity_by_agent[agent_id] = float(
                 min(capacity, self.cfg.cognition_max_service_per_step)
             )
@@ -988,13 +1093,21 @@ class ResourceCognitionEnv:
             interference_by_agent[agent_id] = float(interference_power)
 
         self._last_interference_power_by_agent = interference_by_agent
-        return capacity_by_agent, sinr_by_agent, path_loss_by_agent, outage_by_agent
+        self._last_raw_capacity_by_agent = raw_capacity_by_agent
+        return (
+            capacity_by_agent,
+            sinr_by_agent,
+            path_loss_by_agent,
+            outage_by_agent,
+            raw_capacity_by_agent,
+        )
 
     def _evaluate_schedule(
         self,
         assignments: np.ndarray,
         *,
         use_truth: bool,
+        resource_levels: Optional[np.ndarray] = None,
     ) -> Tuple[float, np.ndarray, np.ndarray, np.ndarray]:
         truth, beliefs = self._require_state()
         assignments = np.asarray(assignments, dtype=np.int64)
@@ -1014,10 +1127,11 @@ class ResourceCognitionEnv:
                     conflict_counts[agent_id] += 1.0
                     conflict_counts[other_id] += 1.0
 
-        capacity_by_agent, _, _, _ = self._physical_service_capacity(
+        capacity_by_agent, _, _, _, _ = self._physical_service_capacity(
             assignments,
             conflict_counts,
             use_truth=use_truth,
+            resource_levels=resource_levels,
         )
         service_by_agent = np.zeros((self.num_agents,), dtype=np.float32)
 
@@ -1139,7 +1253,11 @@ class ResourceCognitionEnv:
         for i, visible in enumerate(self._slot_task_indices):
             mask[i, self.SENSE_ACTION_START + len(visible):sense_end] = 0.0
             if self.cfg.cognition_enable_scheduling:
-                mask[i, self._schedule_action_start() + len(visible):] = 0.0
+                schedule_start = self._schedule_action_start()
+                slots_per_level = self.cfg.cognition_max_task_slots
+                for level in range(len(self.cfg.cognition_resource_level_factors)):
+                    level_start = schedule_start + level * slots_per_level
+                    mask[i, level_start + len(visible):level_start + slots_per_level] = 0.0
         return mask
 
     def _build_info(

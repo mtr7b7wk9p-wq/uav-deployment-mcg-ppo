@@ -66,6 +66,10 @@ class EpisodeMetrics:
     path_loss_db: List[float] = field(default_factory=list)
     sinr: List[float] = field(default_factory=list)
     service_capacity: List[float] = field(default_factory=list)
+    raw_service_capacity: List[float] = field(default_factory=list)
+    capacity_clip_ratio: List[float] = field(default_factory=list)
+    capacity_clipped_count: List[int] = field(default_factory=list)
+    resource_level: List[float] = field(default_factory=list)
     service_outage_count: List[int] = field(default_factory=list)
     service_outage_rate: List[float] = field(default_factory=list)
     interference_power: List[float] = field(default_factory=list)
@@ -90,6 +94,9 @@ class EpisodeMetrics:
     final_path_loss_db: float = 0.0
     final_sinr: float = 0.0
     final_service_capacity: float = 0.0
+    final_raw_service_capacity: float = 0.0
+    final_capacity_clip_ratio: float = 0.0
+    final_mean_resource_level: float = 0.0
     final_service_outage_count: int = 0
     final_service_outage_rate: float = 0.0
     final_interference_power: float = 0.0
@@ -148,6 +155,14 @@ class EpisodeMetrics:
         self.path_loss_db.append(float(info.get("mean_path_loss_db", 0.0)))
         self.sinr.append(float(info.get("mean_sinr", 0.0)))
         self.service_capacity.append(float(info.get("mean_service_capacity", 0.0)))
+        self.raw_service_capacity.append(
+            float(info.get("mean_raw_service_capacity", 0.0))
+        )
+        self.capacity_clip_ratio.append(float(info.get("capacity_clip_ratio", 0.0)))
+        self.capacity_clipped_count.append(
+            int(info.get("capacity_clipped_count", 0))
+        )
+        self.resource_level.append(float(info.get("mean_resource_level", 0.0)))
         self.service_outage_count.append(int(info.get("service_outage_count", 0)))
         self.service_outage_rate.append(float(info.get("service_outage_rate", 0.0)))
         self.interference_power.append(
@@ -199,6 +214,15 @@ class EpisodeMetrics:
         self.final_sinr = float(info.get("mean_sinr", self.final_sinr))
         self.final_service_capacity = float(
             info.get("mean_service_capacity", self.final_service_capacity)
+        )
+        self.final_raw_service_capacity = float(
+            info.get("mean_raw_service_capacity", self.final_raw_service_capacity)
+        )
+        self.final_capacity_clip_ratio = float(
+            info.get("capacity_clip_ratio", self.final_capacity_clip_ratio)
+        )
+        self.final_mean_resource_level = float(
+            info.get("mean_resource_level", self.final_mean_resource_level)
         )
         self.final_service_outage_count = int(
             info.get("service_outage_count", self.final_service_outage_count)
@@ -280,6 +304,15 @@ class EpisodeMetrics:
             "mean_path_loss_db": self.final_path_loss_db,
             "mean_sinr": self.final_sinr,
             "mean_service_capacity": self.final_service_capacity,
+            "mean_raw_service_capacity": self.final_raw_service_capacity,
+            "mean_capacity_clip_ratio": (
+                float(np.mean(self.capacity_clip_ratio))
+                if self.capacity_clip_ratio else 0.0
+            ),
+            "total_capacity_clipped_count": int(
+                np.sum(self.capacity_clipped_count)
+            ),
+            "mean_resource_level": self.final_mean_resource_level,
             "total_service_outages": int(np.sum(self.service_outage_count)),
             "service_outage_rate": (
                 float(np.mean(self.service_outage_rate))
@@ -381,6 +414,10 @@ class MetricTracker:
                 "mean_path_loss_db": 0.0,
                 "mean_sinr": 0.0,
                 "mean_service_capacity": 0.0,
+                "mean_raw_service_capacity": 0.0,
+                "mean_capacity_clip_ratio": 0.0,
+                "mean_capacity_clipped_count": 0.0,
+                "mean_resource_level": 0.0,
                 "mean_total_service_outages": 0.0,
                 "mean_service_outage_rate": 0.0,
                 "mean_total_interference_power_w": 0.0,
@@ -478,6 +515,22 @@ class MetricTracker:
             [x.get("mean_service_capacity", 0.0) for x in self.episode_summaries],
             dtype=np.float32,
         )
+        final_raw_service_capacity = np.array(
+            [x.get("mean_raw_service_capacity", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
+        capacity_clip_ratios = np.array(
+            [x.get("mean_capacity_clip_ratio", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
+        capacity_clipped_counts = np.array(
+            [x.get("total_capacity_clipped_count", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
+        mean_resource_levels = np.array(
+            [x.get("mean_resource_level", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
         total_service_outages = np.array(
             [x.get("total_service_outages", 0.0) for x in self.episode_summaries],
             dtype=np.float32,
@@ -566,6 +619,10 @@ class MetricTracker:
             "mean_path_loss_db": float(np.mean(final_path_loss_db)),
             "mean_sinr": float(np.mean(final_sinr)),
             "mean_service_capacity": float(np.mean(final_service_capacity)),
+            "mean_raw_service_capacity": float(np.mean(final_raw_service_capacity)),
+            "mean_capacity_clip_ratio": float(np.mean(capacity_clip_ratios)),
+            "mean_capacity_clipped_count": float(np.mean(capacity_clipped_counts)),
+            "mean_resource_level": float(np.mean(mean_resource_levels)),
             "mean_total_service_outages": float(np.mean(total_service_outages)),
             "mean_service_outage_rate": float(np.mean(service_outage_rates)),
             "mean_total_interference_power_w": float(

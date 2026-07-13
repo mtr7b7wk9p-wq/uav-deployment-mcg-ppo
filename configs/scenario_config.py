@@ -151,6 +151,7 @@ class ScenarioConfig:
     cognition_service_reward_weight: float = 5.0
     cognition_priority_service_weight: float = 2.0
     cognition_bandwidth_mhz: float = 1.0
+    cognition_resource_level_factors: Tuple[float, float, float] = (0.5, 1.0, 1.5)
     cognition_tx_power_w: float = 1.0
     cognition_noise_power_w: float = 1e-13
     cognition_service_duration_s: float = 1.0
@@ -324,6 +325,9 @@ class ScenarioConfig:
             max(self.cognition_priority_service_weight, 0.0)
         )
         self.cognition_bandwidth_mhz = float(max(self.cognition_bandwidth_mhz, 0.0))
+        self.cognition_resource_level_factors = tuple(
+            float(max(factor, 0.0)) for factor in self.cognition_resource_level_factors
+        )
         self.cognition_tx_power_w = float(max(self.cognition_tx_power_w, 0.0))
         self.cognition_noise_power_w = float(max(self.cognition_noise_power_w, 0.0))
         self.cognition_service_duration_s = float(max(self.cognition_service_duration_s, 0.0))
@@ -401,9 +405,14 @@ class ScenarioConfig:
         )
 
     def get_resource_cognition_action_dim(self) -> int:
-        """Movement, sensing, and optional scheduling actions per local slot."""
-        action_groups = 2 if bool(self.cognition_enable_scheduling) else 1
-        return int(5 + action_groups * self.cognition_max_task_slots)
+        """Movement, sensing, and resource-level scheduling actions per local slot."""
+        sensing_actions = self.cognition_max_task_slots
+        scheduling_actions = (
+            len(self.cognition_resource_level_factors) * self.cognition_max_task_slots
+            if bool(self.cognition_enable_scheduling)
+            else 0
+        )
+        return int(5 + sensing_actions + scheduling_actions)
 
     def validate(self) -> None:
         if self.r_safe <= 0 or self.r_disaster <= self.r_safe:
@@ -508,6 +517,15 @@ class ScenarioConfig:
 
         if self.cognition_bandwidth_mhz <= 0.0:
             raise ValueError("cognition_bandwidth_mhz must be positive.")
+
+        if len(self.cognition_resource_level_factors) != 3:
+            raise ValueError("cognition_resource_level_factors must contain low, medium, and high levels.")
+
+        if any(factor <= 0.0 for factor in self.cognition_resource_level_factors):
+            raise ValueError("cognition_resource_level_factors must be positive.")
+
+        if tuple(sorted(self.cognition_resource_level_factors)) != self.cognition_resource_level_factors:
+            raise ValueError("cognition_resource_level_factors must be non-decreasing.")
 
         if self.cognition_tx_power_w <= 0.0:
             raise ValueError("cognition_tx_power_w must be positive.")

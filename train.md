@@ -19,9 +19,9 @@ python runners/train_ppo_deployment.py --method-name ppo_resource_cognition
 ```
 python runners/train_ppo_deployment.py --method-name mcg_ppo_resource_cognition
 ```
-Resource cognition uses aggregate business queues for each area-band task. Queue, arrival, and served-data units are Mbit. Queues receive stochastic arrivals and are reduced only by actual scheduled service. The service rate is computed from air-to-ground path loss, received power, same-band interference, noise, SINR, and Shannon rate, then constrained by queue and per-step limits. Local task and message slots now contain 17 features each, so the default resource observation dimension is 176; old resource checkpoints are not compatible.
+Resource cognition uses aggregate business queues for each area-band task. Queue, arrival, and served-data units are Mbit. Queues receive stochastic arrivals and are reduced only by actual scheduled service. The service rate is computed from air-to-ground path loss, received power, same-band interference, noise, SINR, and Shannon rate, then constrained by queue and per-step limits. Local task and message slots now contain 17 features each, so the default resource observation dimension is 176; old resource checkpoints are not compatible. Scheduling actions select a visible task at low/medium/high resource levels with default bandwidth factors 0.5/1.0/1.5. Training logs include raw capacity, clipped capacity, clipping ratio, and mean resource level for calibrating cognition_max_service_per_step.
 资源认知任务使用“区域-频段”单元，同时维护频谱占用和需求强度的局部认知；链路质量来自局部几何关系，真实任务优先级不进入局部观测。正式 `mcg_ppo_resource_cognition` 还启用逐 UAV 反事实贡献奖励。
-资源动作中，前 5 个为移动动作，随后是感知可见任务槽，最后是调度可见任务槽。调度奖励由需求满足、频谱可用性、链路质量、同频冲突和服务能耗共同决定。
+资源动作中，前 5 个为移动动作，随后是感知可见任务槽，最后是每个任务槽对应的低/中/高三档调度动作。默认资源档位系数为 0.5/1.0/1.5，并在 Shannon 容量计算前缩放带宽；训练信息同时记录原始容量、裁剪后容量、容量裁剪比例和平均资源档位。调度奖励由需求满足、频谱可用性、链路质量、同频冲突和服务能耗共同决定。
 ### 6. maddpg
 ```
 python runners/train_ppo_deployment.py --method-name maddpg

@@ -136,6 +136,60 @@ class DynamicBusinessQueueTests(unittest.TestCase):
         self.assertEqual(spec.message_slot_dim, 17)
         self.assertEqual(spec.expected_dim, env.local_obs_dim)
 
+    def test_resource_action_dimension_has_three_schedule_levels(self):
+        env = make_env(num_tasks=2)
+        self.assertEqual(env.action_size, 5 + 2 + 3 * 2)
+
+    def test_schedule_action_decodes_task_and_resource_level(self):
+        env = make_env(num_tasks=2)
+        env.reset(seed=10)
+        env._slot_task_indices = [
+            np.array([0, 1], dtype=np.int64),
+            np.array([0, 1], dtype=np.int64),
+        ]
+        start = env._schedule_action_start()
+        actions = np.array([start, start + 2 * env.cfg.cognition_max_task_slots + 1])
+        agents, tasks, levels = env._decode_schedule_actions(actions)
+        self.assertTrue(np.array_equal(agents, [0, 1]))
+        self.assertTrue(np.array_equal(tasks, [0, 1]))
+        self.assertTrue(np.array_equal(levels, [0, 2]))
+
+    def test_resource_level_changes_raw_physical_capacity(self):
+        env = make_env()
+        env.reset(seed=13)
+        env.task_truth.true_states[:] = 0.0
+        env.cfg.cognition_max_service_per_step = 1e6
+        assignments = np.array([0, -1], dtype=np.int64)
+        conflicts = np.zeros(env.num_agents, dtype=np.float32)
+        low = env._physical_service_capacity(
+            assignments,
+            conflicts,
+            use_truth=True,
+            resource_levels=np.array([0, 1], dtype=np.int64),
+        )
+        high = env._physical_service_capacity(
+            assignments,
+            conflicts,
+            use_truth=True,
+            resource_levels=np.array([2, 1], dtype=np.int64),
+        )
+        self.assertGreater(high[4][0], low[4][0])
+        self.assertGreater(high[0][0], low[0][0])
+
+    def test_scheduling_reports_capacity_clipping(self):
+        env = make_env()
+        env.reset(seed=14)
+        env.task_truth.queue_lengths[:] = 100.0
+        env.cfg.cognition_max_service_per_step = 1.0
+        stats = env._execute_scheduling(
+            np.array([0], dtype=np.int64),
+            np.array([0], dtype=np.int64),
+            np.array([2, 1], dtype=np.int64),
+        )
+        self.assertGreater(stats["mean_raw_service_capacity"], stats["mean_service_capacity"])
+        self.assertGreater(stats["capacity_clip_ratio"], 0.0)
+        self.assertGreater(stats["capacity_clipped_count"], 0)
+
     def test_metrics_collect_dynamic_service_fields(self):
         metrics = EpisodeMetrics()
         metrics.update(1.0, {
@@ -211,6 +265,10 @@ class DynamicBusinessQueueTests(unittest.TestCase):
             "mean_path_loss_db": 95.0,
             "mean_sinr": 4.0,
             "mean_service_capacity": 1.5,
+            "mean_raw_service_capacity": 3.0,
+            "capacity_clip_ratio": 0.5,
+            "capacity_clipped_count": 1,
+            "mean_resource_level": 2.0,
             "service_outage_count": 1,
             "service_outage_rate": 0.5,
             "total_interference_power_w": 2e-13,
@@ -219,3 +277,6 @@ class DynamicBusinessQueueTests(unittest.TestCase):
         self.assertEqual(summary["mean_path_loss_db"], 95.0)
         self.assertEqual(summary["mean_sinr"], 4.0)
         self.assertEqual(summary["total_service_outages"], 1)
+        self.assertEqual(summary["mean_raw_service_capacity"], 3.0)
+        self.assertEqual(summary["mean_capacity_clip_ratio"], 0.5)
+        self.assertEqual(summary["total_capacity_clipped_count"], 1)
