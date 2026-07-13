@@ -23,6 +23,11 @@ class CognitionMessage:
     demand_uncertainty: float = 1.0
     demand_confidence: float = 0.0
     demand_aoi: float = 0.0
+    queue_estimate: float = 0.0
+    queue_uncertainty: float = 1.0
+    queue_confidence: float = 0.0
+    queue_aoi: float = 0.0
+    arrival_estimate: float = 0.0
 
 
 @dataclass(frozen=True)

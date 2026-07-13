@@ -352,6 +352,11 @@ class LocalBeliefBatch:
         demand_uncertainty: float = 1.0,
         demand_confidence: float = 0.0,
         demand_aoi: float = 0.0,
+        queue_estimate: float = 0.0,
+        queue_uncertainty: float = 1.0,
+        queue_confidence: float = 0.0,
+        queue_aoi: float = 0.0,
+        arrival_estimate: float = 0.0,
         source_update_step: int,
         current_step: int,
         confidence_threshold: float,
@@ -370,7 +375,15 @@ class LocalBeliefBatch:
             receiver_id, task_id, demand_estimate, demand_uncertainty, demand_confidence, demand_aoi,
             source_update_step, current_step, confidence_threshold, freshness_decay,
         )
-        accepted = spectrum_accepted or demand_accepted
+        queue_accepted = self._fuse_dimension(
+            self.queue_estimates, self.queue_uncertainties, self.queue_aoi, self.queue_confidence,
+            receiver_id, task_id, queue_estimate, queue_uncertainty, queue_confidence, queue_aoi,
+            source_update_step, current_step, confidence_threshold, freshness_decay,
+            estimate_max=None,
+        )
+        if queue_accepted:
+            self.arrival_estimates[receiver_id, task_id] = max(float(arrival_estimate), 0.0)
+        accepted = spectrum_accepted or demand_accepted or queue_accepted
         if accepted:
             self.last_update_step[receiver_id, task_id] = max(
                 int(self.last_update_step[receiver_id, task_id]), int(source_update_step)
@@ -381,6 +394,7 @@ class LocalBeliefBatch:
             "quality_gain": float(quality_gain),
             "spectrum_accepted": float(spectrum_accepted),
             "demand_accepted": float(demand_accepted),
+            "queue_accepted": float(queue_accepted),
         }
 
     def _fuse_dimension(
@@ -399,6 +413,7 @@ class LocalBeliefBatch:
         current_step: int,
         confidence_threshold: float,
         freshness_decay: float,
+        estimate_max: float | None = 1.0,
     ) -> bool:
         transit_age = max(int(current_step) - int(source_update_step), 0)
         effective_aoi = min(float(message_aoi) + transit_age, self.max_aoi)
@@ -416,9 +431,12 @@ class LocalBeliefBatch:
 
         local_confidence = float(confidences[receiver_id, task_id])
         weight_sum = max(local_confidence + effective_confidence, 1e-6)
+        value = float(max(float(estimate), 0.0))
+        if estimate_max is not None:
+            value = min(value, float(estimate_max))
         estimates[receiver_id, task_id] = (
             local_confidence * float(estimates[receiver_id, task_id])
-            + effective_confidence * float(np.clip(estimate, 0.0, 1.0))
+            + effective_confidence * value
         ) / weight_sum
         uncertainties[receiver_id, task_id] = min(local_uncertainty, effective_uncertainty)
         aois[receiver_id, task_id] = min(local_aoi, effective_aoi)
