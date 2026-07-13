@@ -150,6 +150,16 @@ class ScenarioConfig:
     cognition_queue_reward_weight: float = 1.0
     cognition_service_reward_weight: float = 5.0
     cognition_priority_service_weight: float = 2.0
+    cognition_bandwidth_mhz: float = 1.0
+    cognition_tx_power_w: float = 1.0
+    cognition_noise_power_w: float = 1e-13
+    cognition_service_duration_s: float = 1.0
+    cognition_channel_carrier_freq_ghz: float = 2.0
+    cognition_channel_los_a: float = 9.61
+    cognition_channel_los_b: float = 0.16
+    cognition_channel_eta_los_db: float = 1.0
+    cognition_channel_eta_nlos_db: float = 20.0
+    cognition_outage_sinr_threshold: float = 0.0
 
     # =========================
     # Reward（ppo_main 基线原始 reward）
@@ -312,6 +322,24 @@ class ScenarioConfig:
         self.cognition_service_reward_weight = float(max(self.cognition_service_reward_weight, 0.0))
         self.cognition_priority_service_weight = float(
             max(self.cognition_priority_service_weight, 0.0)
+        )
+        self.cognition_bandwidth_mhz = float(max(self.cognition_bandwidth_mhz, 0.0))
+        self.cognition_tx_power_w = float(max(self.cognition_tx_power_w, 0.0))
+        self.cognition_noise_power_w = float(max(self.cognition_noise_power_w, 0.0))
+        self.cognition_service_duration_s = float(max(self.cognition_service_duration_s, 0.0))
+        self.cognition_channel_carrier_freq_ghz = float(
+            max(self.cognition_channel_carrier_freq_ghz, 0.0)
+        )
+        self.cognition_channel_los_a = float(max(self.cognition_channel_los_a, 0.0))
+        self.cognition_channel_los_b = float(max(self.cognition_channel_los_b, 0.0))
+        self.cognition_channel_eta_los_db = float(
+            max(self.cognition_channel_eta_los_db, 0.0)
+        )
+        self.cognition_channel_eta_nlos_db = float(
+            max(self.cognition_channel_eta_nlos_db, 0.0)
+        )
+        self.cognition_outage_sinr_threshold = float(
+            max(self.cognition_outage_sinr_threshold, 0.0)
         )
         self.reward_weight_uncertainty_gain = float(max(self.reward_weight_uncertainty_gain, 0.0))
         self.reward_weight_aoi_gain = float(max(self.reward_weight_aoi_gain, 0.0))
@@ -477,6 +505,21 @@ class ScenarioConfig:
 
         if self.cognition_max_service_per_step <= 0.0:
             raise ValueError("cognition_max_service_per_step must be positive.")
+
+        if self.cognition_bandwidth_mhz <= 0.0:
+            raise ValueError("cognition_bandwidth_mhz must be positive.")
+
+        if self.cognition_tx_power_w <= 0.0:
+            raise ValueError("cognition_tx_power_w must be positive.")
+
+        if self.cognition_noise_power_w <= 0.0:
+            raise ValueError("cognition_noise_power_w must be positive.")
+
+        if self.cognition_service_duration_s <= 0.0:
+            raise ValueError("cognition_service_duration_s must be positive.")
+
+        if self.cognition_channel_carrier_freq_ghz <= 0.0:
+            raise ValueError("cognition_channel_carrier_freq_ghz must be positive.")
 
         if self.cognition_communication_radius <= 0:
             raise ValueError("cognition_communication_radius must be positive.")

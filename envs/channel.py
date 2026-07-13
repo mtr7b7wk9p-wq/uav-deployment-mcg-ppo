@@ -172,6 +172,20 @@ def free_space_path_loss_db(
     return fspl.astype(np.float32)
 
 
+def channel_gain_from_path_loss_db(path_loss_db: np.ndarray) -> np.ndarray:
+    """Convert path loss in dB into a linear power gain."""
+    path_loss = np.asarray(path_loss_db, dtype=np.float32)
+    return np.power(10.0, -path_loss / 10.0).astype(np.float32)
+
+
+def shannon_rate_mbps(bandwidth_mhz: float, sinr: np.ndarray) -> np.ndarray:
+    """Return Shannon rate in Mbit/s for a bandwidth expressed in MHz."""
+    if bandwidth_mhz <= 0.0:
+        raise ValueError("bandwidth_mhz must be positive.")
+    values = np.maximum(np.asarray(sinr, dtype=np.float32), 0.0)
+    return (float(bandwidth_mhz) * np.log2(1.0 + values)).astype(np.float32)
+
+
 def average_atg_path_loss_db(
     ue_xy: np.ndarray,
     uav_xyz: np.ndarray,

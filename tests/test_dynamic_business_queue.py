@@ -6,6 +6,10 @@ from configs.scenario_config import ScenarioConfig
 from envs.resource_cognition_env import ResourceCognitionEnv
 from agents.ppo.models import ResourceCognitionObsSliceSpec
 from envs.metrics import EpisodeMetrics
+from envs.channel import (
+    channel_gain_from_path_loss_db,
+    shannon_rate_mbps,
+)
 
 
 def make_truth(queue_lengths, queue_capacity=10.0):
@@ -149,3 +153,54 @@ class DynamicBusinessQueueTests(unittest.TestCase):
         self.assertEqual(summary["total_served_data"], 2.0)
         self.assertEqual(summary["final_total_queue"], 4.0)
         self.assertEqual(summary["weighted_demand_satisfaction"], 0.25)
+
+    def test_path_loss_gain_and_shannon_rate_are_monotonic(self):
+        gain = channel_gain_from_path_loss_db(
+            np.array([80.0, 100.0], dtype=np.float32)
+        )
+        rate = shannon_rate_mbps(
+            1.0,
+            np.array([1.0, 3.0], dtype=np.float32),
+        )
+        self.assertGreater(gain[0], gain[1])
+        self.assertGreater(rate[1], rate[0])
+
+    def test_physical_config_rejects_non_positive_parameters(self):
+        with self.assertRaises(ValueError):
+            ScenarioConfig(
+                use_resource_cognition=True,
+                cognition_bandwidth_mhz=0.0,
+            ).validate()
+
+    def test_physical_service_capacity_decreases_with_noise(self):
+        env = make_env()
+        env.reset(seed=11)
+        env.task_truth.true_states[:] = 0.0
+        assignments = np.array([0, -1], dtype=np.int64)
+        conflicts = np.zeros(env.num_agents, dtype=np.float32)
+        first = env._physical_service_capacity(assignments, conflicts, use_truth=True)
+        env.cfg.cognition_noise_power_w *= 100.0
+        second = env._physical_service_capacity(assignments, conflicts, use_truth=True)
+        self.assertLessEqual(second[1][0], first[1][0])
+        self.assertLessEqual(second[0][0], first[0][0])
+
+    def test_same_band_interference_reduces_physical_capacity(self):
+        env = make_env()
+        env.reset(seed=12)
+        env.task_truth.true_states[:] = 0.0
+        env.task_truth.band_ids[:] = 0
+        env.task_truth.positions_xy[1] = env.task_truth.positions_xy[0]
+        assignments = np.array([0, 1], dtype=np.int64)
+        conflicts = np.zeros(env.num_agents, dtype=np.float32)
+        with_interference = env._physical_service_capacity(
+            assignments,
+            conflicts,
+            use_truth=True,
+        )
+        without_interference = env._physical_service_capacity(
+            np.array([0, -1], dtype=np.int64),
+            conflicts,
+            use_truth=True,
+        )
+        self.assertLess(with_interference[1][0], without_interference[1][0])
+        self.assertLess(with_interference[0][0], without_interference[0][0])
