@@ -5,6 +5,7 @@ from envs.task_model import LocalBeliefBatch, TaskTruthBatch
 from configs.scenario_config import ScenarioConfig
 from envs.resource_cognition_env import ResourceCognitionEnv
 from agents.ppo.models import ResourceCognitionObsSliceSpec
+from envs.metrics import EpisodeMetrics
 
 
 def make_truth(queue_lengths, queue_capacity=10.0):
@@ -130,3 +131,21 @@ class DynamicBusinessQueueTests(unittest.TestCase):
         self.assertEqual(spec.task_slot_dim, 17)
         self.assertEqual(spec.message_slot_dim, 17)
         self.assertEqual(spec.expected_dim, env.local_obs_dim)
+
+    def test_metrics_collect_dynamic_service_fields(self):
+        metrics = EpisodeMetrics()
+        metrics.update(1.0, {
+            "total_arrivals": 3.0,
+            "scheduling_served_data": 2.0,
+            "total_queue_length": 4.0,
+            "service_rate": 0.5,
+            "weighted_demand_satisfaction": 0.25,
+            "high_priority_service_rate": 0.75,
+            "queue_overflow": 1.0,
+            "service_energy_consumption": 2.0,
+        })
+        summary = metrics.summary()
+        self.assertEqual(summary["total_arrivals"], 3.0)
+        self.assertEqual(summary["total_served_data"], 2.0)
+        self.assertEqual(summary["final_total_queue"], 4.0)
+        self.assertEqual(summary["weighted_demand_satisfaction"], 0.25)

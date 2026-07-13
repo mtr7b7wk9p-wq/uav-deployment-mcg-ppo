@@ -55,6 +55,14 @@ class EpisodeMetrics:
     scheduling_estimated_utility: List[float] = field(default_factory=list)
     scheduling_conflict_count: List[int] = field(default_factory=list)
     scheduling_energy_consumption: List[float] = field(default_factory=list)
+    arrivals: List[float] = field(default_factory=list)
+    served_data: List[float] = field(default_factory=list)
+    queue_length: List[float] = field(default_factory=list)
+    service_rate: List[float] = field(default_factory=list)
+    weighted_demand_satisfaction: List[float] = field(default_factory=list)
+    high_priority_service_rate: List[float] = field(default_factory=list)
+    queue_overflow: List[float] = field(default_factory=list)
+    service_energy_consumption: List[float] = field(default_factory=list)
     reward_component_history: Dict[str, List[float]] = field(default_factory=dict)
 
     final_total_distance_per_uav: Optional[np.ndarray] = None
@@ -69,6 +77,10 @@ class EpisodeMetrics:
     final_spectrum_estimation_error: float = 0.0
     final_demand_estimation_error: float = 0.0
     final_scheduling_team_utility: float = 0.0
+    final_total_queue: float = 0.0
+    final_service_rate: float = 0.0
+    final_weighted_demand_satisfaction: float = 0.0
+    final_high_priority_service_rate: float = 0.0
     episode_length: int = 0
     done_reason: str = "unknown"
 
@@ -107,6 +119,20 @@ class EpisodeMetrics:
         self.scheduling_energy_consumption.append(
             float(info.get("scheduling_energy_consumption", 0.0))
         )
+        self.arrivals.append(float(info.get("total_arrivals", 0.0)))
+        self.served_data.append(float(info.get("scheduling_served_data", 0.0)))
+        self.queue_length.append(float(info.get("total_queue_length", 0.0)))
+        self.service_rate.append(float(info.get("service_rate", 0.0)))
+        self.weighted_demand_satisfaction.append(
+            float(info.get("weighted_demand_satisfaction", 0.0))
+        )
+        self.high_priority_service_rate.append(
+            float(info.get("high_priority_service_rate", 0.0))
+        )
+        self.queue_overflow.append(float(info.get("queue_overflow", 0.0)))
+        self.service_energy_consumption.append(
+            float(info.get("service_energy_consumption", 0.0))
+        )
 
         for key, value in info.items():
             if _should_collect_reward_key(key, value):
@@ -133,6 +159,19 @@ class EpisodeMetrics:
         )
         self.final_scheduling_team_utility = float(
             info.get("scheduling_team_utility", self.final_scheduling_team_utility)
+        )
+        self.final_total_queue = float(
+            info.get("total_queue_length", self.final_total_queue)
+        )
+        self.final_service_rate = float(info.get("service_rate", self.final_service_rate))
+        self.final_weighted_demand_satisfaction = float(
+            info.get(
+                "weighted_demand_satisfaction",
+                self.final_weighted_demand_satisfaction,
+            )
+        )
+        self.final_high_priority_service_rate = float(
+            info.get("high_priority_service_rate", self.final_high_priority_service_rate)
         )
         self.episode_length = int(info.get("step", len(self.rewards)))
         self.done_reason = str(info.get("termination_reason", self.done_reason))
@@ -186,6 +225,22 @@ class EpisodeMetrics:
             "final_spectrum_estimation_error": self.final_spectrum_estimation_error,
             "final_demand_estimation_error": self.final_demand_estimation_error,
             "final_scheduling_team_utility": self.final_scheduling_team_utility,
+            "total_arrivals": float(np.sum(self.arrivals)),
+            "total_served_data": float(np.sum(self.served_data)),
+            "final_total_queue": self.final_total_queue,
+            "service_rate": float(np.mean(self.service_rate)) if self.service_rate else 0.0,
+            "weighted_demand_satisfaction": (
+                float(np.mean(self.weighted_demand_satisfaction))
+                if self.weighted_demand_satisfaction else 0.0
+            ),
+            "high_priority_service_rate": (
+                float(np.mean(self.high_priority_service_rate))
+                if self.high_priority_service_rate else 0.0
+            ),
+            "total_queue_overflow": float(np.sum(self.queue_overflow)),
+            "total_service_energy_consumption": float(
+                np.sum(self.service_energy_consumption)
+            ),
             "mean_scheduling_team_utility": float(
                 np.mean(self.scheduling_team_utility)
             ) if self.scheduling_team_utility else 0.0,
@@ -270,6 +325,14 @@ class MetricTracker:
                 "mean_final_scheduling_team_utility": 0.0,
                 "mean_total_scheduling_conflicts": 0.0,
                 "mean_total_scheduling_energy_consumption": 0.0,
+                "mean_total_arrivals": 0.0,
+                "mean_total_served_data": 0.0,
+                "mean_final_total_queue": 0.0,
+                "mean_service_rate": 0.0,
+                "mean_weighted_demand_satisfaction": 0.0,
+                "mean_high_priority_service_rate": 0.0,
+                "mean_total_queue_overflow": 0.0,
+                "mean_total_service_energy_consumption": 0.0,
                 "mean_total_messages_attempted": 0.0,
                 "mean_total_messages_dropped": 0.0,
                 "mean_total_messages_delivered": 0.0,
@@ -318,6 +381,38 @@ class MetricTracker:
         )
         total_scheduling_energy_consumption = np.array(
             [x.get("total_scheduling_energy_consumption", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
+        total_arrivals = np.array(
+            [x.get("total_arrivals", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
+        total_served_data = np.array(
+            [x.get("total_served_data", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
+        final_total_queue = np.array(
+            [x.get("final_total_queue", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
+        service_rates = np.array(
+            [x.get("service_rate", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
+        weighted_demand_satisfaction = np.array(
+            [x.get("weighted_demand_satisfaction", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
+        high_priority_service_rate = np.array(
+            [x.get("high_priority_service_rate", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
+        total_queue_overflow = np.array(
+            [x.get("total_queue_overflow", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
+        total_service_energy_consumption = np.array(
+            [x.get("total_service_energy_consumption", 0.0) for x in self.episode_summaries],
             dtype=np.float32,
         )
         total_messages_attempted = np.array([x.get("total_messages_attempted", 0.0) for x in self.episode_summaries], dtype=np.float32)
@@ -378,6 +473,20 @@ class MetricTracker:
             ),
             "mean_total_scheduling_energy_consumption": float(
                 np.mean(total_scheduling_energy_consumption)
+            ),
+            "mean_total_arrivals": float(np.mean(total_arrivals)),
+            "mean_total_served_data": float(np.mean(total_served_data)),
+            "mean_final_total_queue": float(np.mean(final_total_queue)),
+            "mean_service_rate": float(np.mean(service_rates)),
+            "mean_weighted_demand_satisfaction": float(
+                np.mean(weighted_demand_satisfaction)
+            ),
+            "mean_high_priority_service_rate": float(
+                np.mean(high_priority_service_rate)
+            ),
+            "mean_total_queue_overflow": float(np.mean(total_queue_overflow)),
+            "mean_total_service_energy_consumption": float(
+                np.mean(total_service_energy_consumption)
             ),
             "mean_total_messages_attempted": float(np.mean(total_messages_attempted)),
             "mean_total_messages_dropped": float(np.mean(total_messages_dropped)),
