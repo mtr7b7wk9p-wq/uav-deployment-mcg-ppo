@@ -28,13 +28,19 @@ Train the trusted-sensing prototype with uncertainty, information age, task prio
 python runners/train_ppo_deployment.py --method-name mcg_ppo_sensing
 ```
 
-Train the independent resource-cognition environment with explicit local sensing actions:
+Train the flat-MLP resource-cognition PPO baseline:
+
+```powershell
+python runners/train_ppo_deployment.py --method-name ppo_resource_cognition
+```
+
+Train the resource-cognition MCG-PPO with task and received-message aggregation:
 
 ```powershell
 python runners/train_ppo_deployment.py --method-name mcg_ppo_resource_cognition
 ```
 
-`mcg_ppo` remains the coverage prototype. `mcg_ppo_sensing` is the earlier automatic-sensing prototype. `mcg_ppo_resource_cognition` is the new task-based environment: movement does not automatically update a task, and the policy must select a visible sensing slot.
+`mcg_ppo` remains the coverage prototype. `mcg_ppo_sensing` is the earlier automatic-sensing prototype. `ppo_resource_cognition` is the flat-network cognition baseline, while `mcg_ppo_resource_cognition` uses the dedicated structured cognition encoder. Old MLP checkpoints previously written under `mcg_ppo_resource_cognition` are not compatible with the new encoder.
 
 The resource-cognition environment keeps one belief map per UAV. A local sensing result reaches another UAV only through an event-triggered message within the configured communication radius. Messages are delayed, may be dropped, and are fused only when their confidence and freshness improve the receiver's local belief.
 

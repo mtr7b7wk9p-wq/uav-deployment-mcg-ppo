@@ -507,6 +507,8 @@ def run_registered_shared_training(
         max_obs_uavs=int(scenario_cfg.max_obs_uavs),
         num_direction_sectors=int(scenario_cfg.num_direction_sectors),
         num_radial_bins=int(scenario_cfg.num_radial_bins),
+        resource_num_task_slots=int(scenario_cfg.cognition_max_task_slots),
+        resource_num_message_slots=int(scenario_cfg.max_obs_uavs),
     )
     ppo_cfg = PPOConfig(**ppo_cfg_kwargs)
 

@@ -39,6 +39,7 @@ class ResourceCognitionEnv:
         self.task_truth: Optional[TaskTruthBatch] = None
         self.local_beliefs: Optional[LocalBeliefBatch] = None
         self.communication_model: Optional[NeighborCommunicationModel] = None
+        self._received_message_cache: List[Dict[int, Tuple[CognitionMessage, bool]]] = []
         self._slot_task_indices: List[np.ndarray] = []
         self._last_info: Dict[str, Any] = {}
 
@@ -88,6 +89,7 @@ class ResourceCognitionEnv:
             delay_steps=self.cfg.cognition_communication_delay_steps,
             packet_loss_rate=self.cfg.cognition_packet_loss_rate,
         )
+        self._received_message_cache = [dict() for _ in range(self.num_agents)]
         self.remaining_time[:] = self.cfg.uav_max_time
         self.total_distance_per_uav[:] = 0.0
         self._last_info = self._build_info(
@@ -267,22 +269,28 @@ class ResourceCognitionEnv:
                 dtype=np.float32,
             )
 
-        neighbor_features = np.zeros((self.cfg.max_obs_uavs, 4), dtype=np.float32)
-        neighbor_distances = {
-            j: float(np.linalg.norm(self.uav_positions[j, :2] - position))
-            for j in range(self.num_agents)
-            if j != i
-        }
-        neighbor_ids = sorted(
-            (j for j, distance in neighbor_distances.items() if distance <= self.cfg.obs_radius),
-            key=neighbor_distances.get,
-        )
-        for slot, j in enumerate(neighbor_ids[: self.cfg.max_obs_uavs]):
-            rel = self.uav_positions[j, :2] - position
+        neighbor_features = np.zeros((self.cfg.max_obs_uavs, 8), dtype=np.float32)
+        received = [
+            (sender_id, message, accepted)
+            for sender_id, (message, accepted) in self._received_message_cache[i].items()
+            if self.current_step - message.created_step <= self.cfg.task_max_aoi
+        ]
+        received.sort(key=lambda item: (item[1].created_step, item[0]), reverse=True)
+        for slot, (sender_id, message, accepted) in enumerate(
+            received[: self.cfg.max_obs_uavs]
+        ):
+            message_age = min(
+                max(self.current_step - message.created_step, 0),
+                self.cfg.task_max_aoi,
+            )
             neighbor_features[slot] = [
-                rel[0] / self.cfg.obs_radius,
-                rel[1] / self.cfg.obs_radius,
-                neighbor_distances[j] / self.cfg.obs_radius,
+                sender_id / max(self.num_agents - 1, 1),
+                message.task_id / max(len(truth) - 1, 1),
+                message.estimate,
+                message.uncertainty,
+                message.confidence,
+                message_age / max(self.cfg.task_max_aoi, 1e-6),
+                1.0 if accepted else 0.0,
                 1.0,
             ]
         return np.concatenate(
@@ -407,6 +415,10 @@ class ResourceCognitionEnv:
             )
             accepted += int(result["accepted"])
             quality_gain += float(result["quality_gain"])
+            self._received_message_cache[message.receiver_id][message.sender_id] = (
+                message,
+                bool(result["accepted"]),
+            )
         return {"accepted": float(accepted), "quality_gain": float(quality_gain)}
 
     def _init_uavs(self) -> None:
@@ -528,7 +540,7 @@ class ResourceCognitionEnv:
         }
 
     def _compute_local_obs_dim(self) -> int:
-        return int(6 + self.cfg.cognition_max_task_slots * 8 + self.cfg.max_obs_uavs * 4)
+        return int(6 + self.cfg.cognition_max_task_slots * 8 + self.cfg.max_obs_uavs * 8)
 
     def _require_state(self) -> Tuple[TaskTruthBatch, LocalBeliefBatch]:
         if self.task_truth is None or self.local_beliefs is None:

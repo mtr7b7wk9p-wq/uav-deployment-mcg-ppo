@@ -19,34 +19,34 @@
 
 **Files:** `configs/ablation_config.py`, `baselines/method_registry.py`, `README.md`, `train.md`
 
-- [ ] Register `ppo_resource_cognition` with the flat PPO configuration.
-- [ ] Keep `mcg_ppo_resource_cognition` and enable the new encoder only for it.
-- [ ] Document checkpoint incompatibility and both training commands.
+- [x] Register `ppo_resource_cognition` with the flat PPO configuration.
+- [x] Keep `mcg_ppo_resource_cognition` and enable the new encoder only for it.
+- [x] Document checkpoint incompatibility and both training commands.
 
 ### Task 2: Message Observation Contract
 
 **Files:** `envs/resource_cognition_env.py`, `configs/scenario_config.py`
 
-- [ ] Store the latest delivered message per receiver-sender pair.
-- [ ] Replace geometric neighbor slots with 8-value delivered-message slots.
-- [ ] Update local observation dimensions.
-- [ ] Verify that only the addressed receiver sees a message slot.
+- [x] Store the latest delivered message per receiver-sender pair.
+- [x] Replace geometric neighbor slots with 8-value delivered-message slots.
+- [x] Update local observation dimensions.
+- [x] Verify that only the addressed receiver sees a message slot.
 
 ### Task 3: Resource Encoder
 
 **Files:** `agents/ppo/models.py`, `agents/ppo/ppo_agent.py`
 
-- [ ] Add resource observation slicing with strict dimension validation.
-- [ ] Add self-conditioned masked task aggregation.
-- [ ] Add self-conditioned masked message aggregation.
-- [ ] Add resource actor and critic networks.
-- [ ] Route `LocalActorCritic` through the resource encoder flag.
+- [x] Add resource observation slicing with strict dimension validation.
+- [x] Add self-conditioned masked task aggregation.
+- [x] Add self-conditioned masked message aggregation.
+- [x] Add resource actor and critic networks.
+- [x] Route `LocalActorCritic` through the resource encoder flag.
 
 ### Task 4: Runner Integration and Verification
 
 **Files:** `runners/train_ppo_deployment.py`
 
-- [ ] Pass resource slot dimensions into `PPOConfig`.
-- [ ] Confirm baseline and MCG network classes differ.
-- [ ] Run syntax and structure checks.
-- [ ] Run one-update CPU training for both resource methods and legacy MCG-PPO.
+- [x] Pass resource slot dimensions into `PPOConfig`.
+- [x] Confirm baseline and MCG network classes differ.
+- [x] Run syntax and structure checks.
+- [x] Run one-update CPU training for both resource methods and legacy MCG-PPO.

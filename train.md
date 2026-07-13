@@ -11,15 +11,19 @@ python runners/train_ppo_deployment.py --method-name mcg_ppo
 ```
 python runners/train_ppo_deployment.py --method-name mcg_ppo_sensing
 ```
-### 4. mcg_ppo_resource_cognition
+### 4. ppo_resource_cognition
+```
+python runners/train_ppo_deployment.py --method-name ppo_resource_cognition
+```
+### 5. mcg_ppo_resource_cognition
 ```
 python runners/train_ppo_deployment.py --method-name mcg_ppo_resource_cognition
 ```
-### 5. maddpg
+### 6. maddpg
 ```
 python runners/train_ppo_deployment.py --method-name maddpg
 ```
-### 6. ippo
+### 7. ippo
 ```
 python runners/train_ppo_deployment.py --method-name ippo
 ```

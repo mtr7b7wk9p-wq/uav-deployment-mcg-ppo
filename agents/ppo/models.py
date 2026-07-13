@@ -561,6 +561,216 @@ class MaskedActorNet(nn.Module):
         return Categorical(logits=logits)
 
 
+@dataclass
+class ResourceCognitionObsSliceSpec:
+    local_obs_dim: int
+    num_task_slots: int
+    num_message_slots: int
+    self_dim: int = 6
+    task_slot_dim: int = 8
+    message_slot_dim: int = 8
+
+    @property
+    def expected_dim(self) -> int:
+        return int(
+            self.self_dim
+            + self.num_task_slots * self.task_slot_dim
+            + self.num_message_slots * self.message_slot_dim
+        )
+
+    def split(self, local_obs: torch.Tensor) -> Dict[str, torch.Tensor]:
+        if local_obs.dim() != 2:
+            raise ValueError(f"Expected local_obs with shape [B, D], got {tuple(local_obs.shape)}")
+        if local_obs.shape[-1] != self.expected_dim:
+            raise ValueError(
+                f"Resource cognition obs dim mismatch: expected {self.expected_dim}, "
+                f"got {local_obs.shape[-1]}."
+            )
+
+        offset = 0
+        self_state = local_obs[:, offset: offset + self.self_dim]
+        offset += self.self_dim
+        task_flat = local_obs[
+            :, offset: offset + self.num_task_slots * self.task_slot_dim
+        ]
+        task_slots = task_flat.view(
+            local_obs.shape[0], self.num_task_slots, self.task_slot_dim
+        )
+        offset += self.num_task_slots * self.task_slot_dim
+        message_flat = local_obs[
+            :, offset: offset + self.num_message_slots * self.message_slot_dim
+        ]
+        message_slots = message_flat.view(
+            local_obs.shape[0], self.num_message_slots, self.message_slot_dim
+        )
+        task_mask = (task_slots.abs().sum(dim=-1) > 1e-8).float()
+        message_mask = (message_slots[..., -1] > 0.5).float()
+        return {
+            "self_state": self_state,
+            "task_slots": task_slots,
+            "task_mask": task_mask,
+            "message_slots": message_slots,
+            "message_mask": message_mask,
+        }
+
+
+class ConditionedSetAggregator(nn.Module):
+    """Aggregate a padded row set with self-conditioned attention and max pooling."""
+
+    def __init__(self, row_dim: int, self_context_dim: int, context_dim: int):
+        super().__init__()
+        self.context_dim = int(context_dim)
+        self.row_encoder = build_mlp(
+            input_dim=row_dim,
+            hidden_dim=context_dim,
+            output_dim=context_dim,
+            num_hidden_layers=1,
+            activation=nn.Tanh,
+        )
+        self.query = nn.Linear(self_context_dim, context_dim)
+        self.key = nn.Linear(context_dim, context_dim)
+        self.fuse = build_mlp(
+            input_dim=2 * context_dim,
+            hidden_dim=context_dim,
+            output_dim=context_dim,
+            num_hidden_layers=1,
+            activation=nn.Tanh,
+        )
+
+    def forward(
+        self,
+        rows: torch.Tensor,
+        row_mask: torch.Tensor,
+        self_context: torch.Tensor,
+    ) -> torch.Tensor:
+        if rows.shape[1] == 0:
+            return rows.new_zeros((rows.shape[0], self.context_dim))
+        row_embed = self.row_encoder(rows)
+        query = self.query(self_context).unsqueeze(1)
+        scores = (self.key(row_embed) * query).sum(dim=-1) / (self.context_dim ** 0.5)
+        scores = scores.masked_fill(row_mask <= 0.0, -1e9)
+        weights = torch.softmax(scores, dim=1) * row_mask
+        weights = weights / torch.clamp(weights.sum(dim=1, keepdim=True), min=1e-8)
+        attended = (row_embed * weights.unsqueeze(-1)).sum(dim=1)
+
+        masked_rows = row_embed.masked_fill(row_mask.unsqueeze(-1) <= 0.0, -1e9)
+        max_pooled = masked_rows.max(dim=1).values
+        no_valid = row_mask.sum(dim=1, keepdim=True) <= 0.0
+        attended = torch.where(no_valid, torch.zeros_like(attended), attended)
+        max_pooled = torch.where(no_valid, torch.zeros_like(max_pooled), max_pooled)
+        fused = self.fuse(torch.cat([attended, max_pooled], dim=-1))
+        return torch.where(no_valid, torch.zeros_like(fused), fused)
+
+
+class ResourceCognitionEncoder(nn.Module):
+    def __init__(
+        self,
+        slice_spec: ResourceCognitionObsSliceSpec,
+        hidden_dim: int,
+        context_dim: int = 64,
+    ):
+        super().__init__()
+        self.slice_spec = slice_spec
+        self.self_encoder = SelfFeatureEncoder(slice_spec.self_dim, context_dim)
+        self.task_aggregator = ConditionedSetAggregator(
+            row_dim=slice_spec.task_slot_dim,
+            self_context_dim=context_dim,
+            context_dim=context_dim,
+        )
+        self.message_aggregator = ConditionedSetAggregator(
+            row_dim=slice_spec.message_slot_dim,
+            self_context_dim=context_dim,
+            context_dim=context_dim,
+        )
+        self.fuse = build_mlp(
+            input_dim=3 * context_dim,
+            hidden_dim=hidden_dim,
+            output_dim=hidden_dim,
+            num_hidden_layers=1,
+            activation=nn.Tanh,
+        )
+
+    def forward(self, local_obs: torch.Tensor) -> torch.Tensor:
+        parts = self.slice_spec.split(local_obs)
+        self_context = self.self_encoder(parts["self_state"])
+        task_context = self.task_aggregator(
+            parts["task_slots"], parts["task_mask"], self_context
+        )
+        message_context = self.message_aggregator(
+            parts["message_slots"], parts["message_mask"], self_context
+        )
+        return self.fuse(torch.cat([self_context, task_context, message_context], dim=-1))
+
+
+class ResourceCognitionActorNet(nn.Module):
+    def __init__(
+        self,
+        local_obs_dim: int,
+        action_dim: int,
+        hidden_dim: int,
+        num_task_slots: int,
+        num_message_slots: int,
+        context_dim: int,
+    ):
+        super().__init__()
+        spec = ResourceCognitionObsSliceSpec(
+            local_obs_dim=local_obs_dim,
+            num_task_slots=num_task_slots,
+            num_message_slots=num_message_slots,
+        )
+        if spec.expected_dim != int(local_obs_dim):
+            raise ValueError(
+                f"Resource encoder expected local_obs_dim={spec.expected_dim}, got {local_obs_dim}."
+            )
+        self.encoder = ResourceCognitionEncoder(spec, hidden_dim, context_dim)
+        self.policy_head = nn.Linear(hidden_dim, action_dim)
+
+    def forward(
+        self,
+        local_obs: torch.Tensor,
+        action_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        logits = self.policy_head(self.encoder(local_obs))
+        if action_mask is not None:
+            logits = torch.where(
+                action_mask > 0.5, logits, torch.full_like(logits, -1e9)
+            )
+        return logits
+
+    def get_dist(
+        self,
+        local_obs: torch.Tensor,
+        action_mask: Optional[torch.Tensor] = None,
+    ) -> Categorical:
+        return Categorical(logits=self.forward(local_obs, action_mask))
+
+
+class ResourceCognitionCriticNet(nn.Module):
+    def __init__(
+        self,
+        local_obs_dim: int,
+        hidden_dim: int,
+        num_task_slots: int,
+        num_message_slots: int,
+        context_dim: int,
+    ):
+        super().__init__()
+        spec = ResourceCognitionObsSliceSpec(
+            local_obs_dim=local_obs_dim,
+            num_task_slots=num_task_slots,
+            num_message_slots=num_message_slots,
+        )
+        if spec.expected_dim != int(local_obs_dim):
+            raise ValueError(
+                f"Resource encoder expected local_obs_dim={spec.expected_dim}, got {local_obs_dim}."
+            )
+        self.encoder = ResourceCognitionEncoder(spec, hidden_dim, context_dim)
+        self.value_head = nn.Linear(hidden_dim, 1)
+
+    def forward(self, local_obs: torch.Tensor) -> torch.Tensor:
+        return self.value_head(self.encoder(local_obs)).squeeze(-1)
+
+
 class StructuredMaskedActorNet(nn.Module):
     """
     MCG-PPO actor:
@@ -706,6 +916,7 @@ class LocalActorCritic(nn.Module):
         hidden_dim: int = 256,
         num_hidden_layers: int = 2,
         use_structured_obs_encoder: bool = False,
+        use_resource_cognition_encoder: bool = False,
         use_neighbor_encoder: bool = False,
         max_obs_users: int = 20,
         max_obs_uavs: int = 2,
@@ -714,13 +925,36 @@ class LocalActorCritic(nn.Module):
         neighbor_encoder_hidden_dim: int = 64,
         neighbor_context_dim: int = 64,
         neighbor_pooling_type: str = "mean_max",
+        resource_num_task_slots: int = 8,
+        resource_num_message_slots: int = 4,
+        resource_context_dim: int = 64,
     ):
         super().__init__()
         self.local_obs_dim = int(local_obs_dim)
         self.action_dim = int(action_dim)
         self.use_structured_obs_encoder = bool(use_structured_obs_encoder)
+        self.use_resource_cognition_encoder = bool(use_resource_cognition_encoder)
 
-        if self.use_structured_obs_encoder:
+        if self.use_structured_obs_encoder and self.use_resource_cognition_encoder:
+            raise ValueError("Coverage and resource cognition encoders cannot both be enabled.")
+
+        if self.use_resource_cognition_encoder:
+            self.actor = ResourceCognitionActorNet(
+                local_obs_dim=local_obs_dim,
+                action_dim=action_dim,
+                hidden_dim=hidden_dim,
+                num_task_slots=resource_num_task_slots,
+                num_message_slots=resource_num_message_slots,
+                context_dim=resource_context_dim,
+            )
+            self.critic = ResourceCognitionCriticNet(
+                local_obs_dim=local_obs_dim,
+                hidden_dim=hidden_dim,
+                num_task_slots=resource_num_task_slots,
+                num_message_slots=resource_num_message_slots,
+                context_dim=resource_context_dim,
+            )
+        elif self.use_structured_obs_encoder:
             self.actor = StructuredMaskedActorNet(
                 local_obs_dim=local_obs_dim,
                 action_dim=action_dim,

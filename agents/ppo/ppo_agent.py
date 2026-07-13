@@ -45,6 +45,7 @@ class PPOConfig:
     # mcg_ppo 通过 ablation_config 打开
     # -------------------------
     use_structured_obs_encoder: bool = False
+    use_resource_cognition_encoder: bool = False
     use_neighbor_encoder: bool = False
 
     neighbor_encoder_hidden_dim: int = 64
@@ -59,6 +60,9 @@ class PPOConfig:
     max_obs_uavs: int = 2
     num_direction_sectors: int = 4
     num_radial_bins: int = 3
+    resource_num_task_slots: int = 8
+    resource_num_message_slots: int = 4
+    resource_context_dim: int = 64
 
 
 class SharedPPOAgent:
@@ -80,6 +84,7 @@ class SharedPPOAgent:
             hidden_dim=config.hidden_dim,
             num_hidden_layers=config.num_hidden_layers,
             use_structured_obs_encoder=config.use_structured_obs_encoder,
+            use_resource_cognition_encoder=config.use_resource_cognition_encoder,
             use_neighbor_encoder=config.use_neighbor_encoder,
             max_obs_users=config.max_obs_users,
             max_obs_uavs=config.max_obs_uavs,
@@ -88,6 +93,9 @@ class SharedPPOAgent:
             neighbor_encoder_hidden_dim=config.neighbor_encoder_hidden_dim,
             neighbor_context_dim=config.neighbor_context_dim,
             neighbor_pooling_type=config.neighbor_pooling_type,
+            resource_num_task_slots=config.resource_num_task_slots,
+            resource_num_message_slots=config.resource_num_message_slots,
+            resource_context_dim=config.resource_context_dim,
         ).to(self.device)
 
         self.optimizer = Adam(self.model.parameters(), lr=config.lr)
