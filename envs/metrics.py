@@ -43,6 +43,12 @@ class EpisodeMetrics:
     cognitive_quality: List[float] = field(default_factory=list)
     estimation_error: List[float] = field(default_factory=list)
     repeat_sensing_ratio: List[float] = field(default_factory=list)
+    messages_attempted: List[int] = field(default_factory=list)
+    messages_dropped: List[int] = field(default_factory=list)
+    messages_delivered: List[int] = field(default_factory=list)
+    messages_fused: List[int] = field(default_factory=list)
+    communication_cost: List[float] = field(default_factory=list)
+    fusion_gain: List[float] = field(default_factory=list)
     reward_component_history: Dict[str, List[float]] = field(default_factory=dict)
 
     final_total_distance_per_uav: Optional[np.ndarray] = None
@@ -68,6 +74,12 @@ class EpisodeMetrics:
         self.cognitive_quality.append(float(info.get("cognitive_quality", 0.0)))
         self.estimation_error.append(float(info.get("mean_estimation_error", 0.0)))
         self.repeat_sensing_ratio.append(float(info.get("repeat_sensing_ratio", 0.0)))
+        self.messages_attempted.append(int(info.get("messages_attempted", 0)))
+        self.messages_dropped.append(int(info.get("messages_dropped", 0)))
+        self.messages_delivered.append(int(info.get("messages_delivered", 0)))
+        self.messages_fused.append(int(info.get("messages_fused", 0)))
+        self.communication_cost.append(float(info.get("communication_cost", 0.0)))
+        self.fusion_gain.append(float(info.get("fusion_gain", 0.0)))
 
         for key, value in info.items():
             if _should_collect_reward_key(key, value):
@@ -113,6 +125,10 @@ class EpisodeMetrics:
             key: float(np.mean(np.array(values, dtype=np.float32)))
             for key, values in sorted(self.reward_component_history.items())
         }
+        total_messages_attempted = int(np.sum(self.messages_attempted))
+        total_messages_dropped = int(np.sum(self.messages_dropped))
+        total_messages_delivered = int(np.sum(self.messages_delivered))
+        total_messages_fused = int(np.sum(self.messages_fused))
 
         summary = {
             # 统一后的主字段
@@ -131,6 +147,15 @@ class EpisodeMetrics:
             "final_task_aoi": self.final_task_aoi,
             "final_cognitive_quality": self.final_cognitive_quality,
             "final_estimation_error": self.final_estimation_error,
+            "total_messages_attempted": total_messages_attempted,
+            "total_messages_dropped": total_messages_dropped,
+            "total_messages_delivered": total_messages_delivered,
+            "total_messages_fused": total_messages_fused,
+            "message_acceptance_ratio": float(
+                total_messages_fused / max(total_messages_delivered, 1)
+            ),
+            "total_communication_cost": float(np.sum(self.communication_cost)),
+            "total_fusion_gain": float(np.sum(self.fusion_gain)),
             "done_reason": self.done_reason,
             "final_active_uav_count": int(self.final_active_uav_count),
             "final_total_distance_per_uav": (
@@ -194,6 +219,13 @@ class MetricTracker:
                 "mean_final_task_aoi": 0.0,
                 "mean_final_cognitive_quality": 0.0,
                 "mean_final_estimation_error": 0.0,
+                "mean_total_messages_attempted": 0.0,
+                "mean_total_messages_dropped": 0.0,
+                "mean_total_messages_delivered": 0.0,
+                "mean_total_messages_fused": 0.0,
+                "mean_message_acceptance_ratio": 0.0,
+                "mean_total_communication_cost": 0.0,
+                "mean_total_fusion_gain": 0.0,
                 "mean_mean_repeat_sensing_ratio": 0.0,
                 "done_reason_histogram": {},
                 "reward_component_episode_total_means": {},
@@ -217,6 +249,13 @@ class MetricTracker:
         final_task_aoi = np.array([x.get("final_task_aoi", 0.0) for x in self.episode_summaries], dtype=np.float32)
         final_cognitive_quality = np.array([x.get("final_cognitive_quality", 0.0) for x in self.episode_summaries], dtype=np.float32)
         final_estimation_error = np.array([x.get("final_estimation_error", 0.0) for x in self.episode_summaries], dtype=np.float32)
+        total_messages_attempted = np.array([x.get("total_messages_attempted", 0.0) for x in self.episode_summaries], dtype=np.float32)
+        total_messages_dropped = np.array([x.get("total_messages_dropped", 0.0) for x in self.episode_summaries], dtype=np.float32)
+        total_messages_delivered = np.array([x.get("total_messages_delivered", 0.0) for x in self.episode_summaries], dtype=np.float32)
+        total_messages_fused = np.array([x.get("total_messages_fused", 0.0) for x in self.episode_summaries], dtype=np.float32)
+        message_acceptance_ratio = np.array([x.get("message_acceptance_ratio", 0.0) for x in self.episode_summaries], dtype=np.float32)
+        total_communication_cost = np.array([x.get("total_communication_cost", 0.0) for x in self.episode_summaries], dtype=np.float32)
+        total_fusion_gain = np.array([x.get("total_fusion_gain", 0.0) for x in self.episode_summaries], dtype=np.float32)
         mean_repeat_sensing_ratio = np.array([x.get("mean_repeat_sensing_ratio", 0.0) for x in self.episode_summaries], dtype=np.float32)
 
         done_reason_histogram: Dict[str, int] = {}
@@ -254,6 +293,13 @@ class MetricTracker:
             "mean_final_task_aoi": float(np.mean(final_task_aoi)),
             "mean_final_cognitive_quality": float(np.mean(final_cognitive_quality)),
             "mean_final_estimation_error": float(np.mean(final_estimation_error)),
+            "mean_total_messages_attempted": float(np.mean(total_messages_attempted)),
+            "mean_total_messages_dropped": float(np.mean(total_messages_dropped)),
+            "mean_total_messages_delivered": float(np.mean(total_messages_delivered)),
+            "mean_total_messages_fused": float(np.mean(total_messages_fused)),
+            "mean_message_acceptance_ratio": float(np.mean(message_acceptance_ratio)),
+            "mean_total_communication_cost": float(np.mean(total_communication_cost)),
+            "mean_total_fusion_gain": float(np.mean(total_fusion_gain)),
             "mean_mean_repeat_sensing_ratio": float(np.mean(mean_repeat_sensing_ratio)),
             "done_reason_histogram": done_reason_histogram,
             "reward_component_episode_total_means": reward_component_episode_total_means,

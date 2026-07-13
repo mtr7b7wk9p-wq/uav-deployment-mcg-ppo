@@ -177,6 +177,68 @@ class LocalBeliefBatch:
             np.clip(np.sum(self.task_priorities * quality) / weights_sum, 0.0, 1.0)
         )
 
+    def fuse_neighbor_message(
+        self,
+        receiver_id: int,
+        task_id: int,
+        *,
+        estimate: float,
+        uncertainty: float,
+        confidence: float,
+        message_aoi: float,
+        source_update_step: int,
+        current_step: int,
+        confidence_threshold: float,
+        freshness_decay: float,
+    ) -> dict[str, float]:
+        """Fuse one delivered message into only the addressed local belief."""
+        receiver_id = self._validate_agent_id(receiver_id)
+        task_id = self._validate_task_id(task_id)
+        transit_age = max(int(current_step) - int(source_update_step), 0)
+        effective_aoi = min(float(message_aoi) + float(transit_age), self.max_aoi)
+        effective_confidence = float(
+            np.clip(
+                float(confidence) * np.exp(-float(freshness_decay) * effective_aoi),
+                0.0,
+                1.0,
+            )
+        )
+        effective_uncertainty = max(
+            float(np.clip(uncertainty, 0.0, 1.0)),
+            1.0 - effective_confidence,
+        )
+        if effective_confidence < float(confidence_threshold):
+            return {"accepted": 0.0, "quality_gain": 0.0}
+
+        local_uncertainty = float(self.uncertainties[receiver_id, task_id])
+        local_aoi = float(self.aoi[receiver_id, task_id])
+        improves_uncertainty = effective_uncertainty < local_uncertainty - 1e-6
+        improves_freshness = effective_aoi < local_aoi - 1e-6
+        if not improves_uncertainty and not improves_freshness:
+            return {"accepted": 0.0, "quality_gain": 0.0}
+
+        quality_before = self.local_quality(receiver_id)
+        local_confidence = float(self.confidence[receiver_id, task_id])
+        weight_sum = max(local_confidence + effective_confidence, 1e-6)
+        fused_estimate = (
+            local_confidence * float(self.estimates[receiver_id, task_id])
+            + effective_confidence * float(np.clip(estimate, 0.0, 1.0))
+        ) / weight_sum
+
+        self.estimates[receiver_id, task_id] = float(np.clip(fused_estimate, 0.0, 1.0))
+        self.uncertainties[receiver_id, task_id] = min(
+            local_uncertainty, effective_uncertainty
+        )
+        self.aoi[receiver_id, task_id] = min(local_aoi, effective_aoi)
+        self.confidence[receiver_id, task_id] = max(
+            local_confidence, effective_confidence
+        )
+        self.last_update_step[receiver_id, task_id] = max(
+            int(self.last_update_step[receiver_id, task_id]), int(source_update_step)
+        )
+        quality_gain = max(self.local_quality(receiver_id) - quality_before, 0.0)
+        return {"accepted": 1.0, "quality_gain": float(quality_gain)}
+
     def mean_quality(self) -> float:
         return float(np.mean([self.local_quality(i) for i in range(self.num_agents)]))
 

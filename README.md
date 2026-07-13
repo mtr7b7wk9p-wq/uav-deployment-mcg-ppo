@@ -36,4 +36,6 @@ python runners/train_ppo_deployment.py --method-name mcg_ppo_resource_cognition
 
 `mcg_ppo` remains the coverage prototype. `mcg_ppo_sensing` is the earlier automatic-sensing prototype. `mcg_ppo_resource_cognition` is the new task-based environment: movement does not automatically update a task, and the policy must select a visible sensing slot.
 
+The resource-cognition environment keeps one belief map per UAV. A local sensing result reaches another UAV only through an event-triggered message within the configured communication radius. Messages are delayed, may be dropped, and are fused only when their confidence and freshness improve the receiver's local belief.
+
 Training outputs are written to `results/train` and are intentionally excluded from version control.

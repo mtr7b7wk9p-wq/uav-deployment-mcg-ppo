@@ -119,6 +119,16 @@ class ScenarioConfig:
     cognition_task_uncertainty_reduction: float = 0.45
     cognition_sensing_cost: float = 0.05
     cognition_repeat_penalty: float = 1.0
+    cognition_enable_communication: bool = True
+    cognition_communication_radius: float = 800.0
+    cognition_communication_delay_steps: int = 1
+    cognition_packet_loss_rate: float = 0.05
+    cognition_message_cost: float = 0.02
+    cognition_max_messages_per_agent: int = 3
+    cognition_message_value_threshold: float = 0.15
+    cognition_fusion_confidence_threshold: float = 0.05
+    cognition_freshness_decay: float = 0.10
+    cognition_fusion_reward_weight: float = 2.0
 
     # =========================
     # Reward（ppo_main 基线原始 reward）
@@ -229,6 +239,17 @@ class ScenarioConfig:
         )
         self.cognition_sensing_cost = float(max(self.cognition_sensing_cost, 0.0))
         self.cognition_repeat_penalty = float(max(self.cognition_repeat_penalty, 0.0))
+        self.cognition_communication_radius = float(max(self.cognition_communication_radius, 1.0))
+        self.cognition_communication_delay_steps = int(max(self.cognition_communication_delay_steps, 0))
+        self.cognition_packet_loss_rate = float(min(max(self.cognition_packet_loss_rate, 0.0), 1.0))
+        self.cognition_message_cost = float(max(self.cognition_message_cost, 0.0))
+        self.cognition_max_messages_per_agent = int(max(self.cognition_max_messages_per_agent, 1))
+        self.cognition_message_value_threshold = float(max(self.cognition_message_value_threshold, 0.0))
+        self.cognition_fusion_confidence_threshold = float(
+            min(max(self.cognition_fusion_confidence_threshold, 0.0), 1.0)
+        )
+        self.cognition_freshness_decay = float(max(self.cognition_freshness_decay, 0.0))
+        self.cognition_fusion_reward_weight = float(max(self.cognition_fusion_reward_weight, 0.0))
         self.reward_weight_uncertainty_gain = float(max(self.reward_weight_uncertainty_gain, 0.0))
         self.reward_weight_aoi_gain = float(max(self.reward_weight_aoi_gain, 0.0))
         self.reward_weight_repeat_sensing_penalty = float(max(self.reward_weight_repeat_sensing_penalty, 0.0))
@@ -365,6 +386,12 @@ class ScenarioConfig:
 
         if self.cognition_max_task_slots <= 0:
             raise ValueError("cognition_max_task_slots must be positive.")
+
+        if self.cognition_communication_radius <= 0:
+            raise ValueError("cognition_communication_radius must be positive.")
+
+        if not 0.0 <= self.cognition_packet_loss_rate <= 1.0:
+            raise ValueError("cognition_packet_loss_rate must be in [0, 1].")
 
         if self.task_min_uncertainty > self.task_initial_uncertainty:
             raise ValueError("task_min_uncertainty must not exceed task_initial_uncertainty.")

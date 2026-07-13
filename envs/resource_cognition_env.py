@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from configs.scenario_config import ScenarioConfig
+from envs.communication_model import CognitionMessage, NeighborCommunicationModel
 from envs.geometry import (
     clip_point_to_ring,
     make_uav_init_positions_center,
@@ -37,12 +38,14 @@ class ResourceCognitionEnv:
         self.total_distance_per_uav = np.zeros((self.num_agents,), dtype=np.float32)
         self.task_truth: Optional[TaskTruthBatch] = None
         self.local_beliefs: Optional[LocalBeliefBatch] = None
+        self.communication_model: Optional[NeighborCommunicationModel] = None
         self._slot_task_indices: List[np.ndarray] = []
         self._last_info: Dict[str, Any] = {}
 
     def reset(self, seed: Optional[int] = None) -> Dict[str, Any]:
         if seed is not None:
             self.rng = set_random_seed(seed)
+        communication_seed = int(self.cfg.seed if seed is None else seed) + 104729
         self.current_step = 0
         self.no_improve_steps = 0
         self._init_uavs()
@@ -79,6 +82,11 @@ class ResourceCognitionEnv:
             initial_uncertainty=self.cfg.task_initial_uncertainty,
             initial_aoi=self.cfg.task_initial_aoi,
             max_aoi=self.cfg.task_max_aoi,
+        )
+        self.communication_model = NeighborCommunicationModel(
+            np.random.default_rng(communication_seed),
+            delay_steps=self.cfg.cognition_communication_delay_steps,
+            packet_loss_rate=self.cfg.cognition_packet_loss_rate,
         )
         self.remaining_time[:] = self.cfg.uav_max_time
         self.total_distance_per_uav[:] = 0.0
@@ -123,6 +131,10 @@ class ResourceCognitionEnv:
             observations = truth.true_states[sensing_tasks] + noise
         else:
             observations = np.zeros((0,), dtype=np.float32)
+        before_sensing_uncertainty = beliefs.uncertainties[
+            sensing_agents, sensing_tasks
+        ].copy()
+        before_sensing_aoi = beliefs.aoi[sensing_agents, sensing_tasks].copy()
         sensing_gain = beliefs.apply_local_sensing(
             sensing_agents,
             sensing_tasks,
@@ -130,6 +142,29 @@ class ResourceCognitionEnv:
             uncertainty_reduction=self.cfg.cognition_task_uncertainty_reduction,
             current_step=self.current_step,
         )
+        local_information_gains = (
+            before_sensing_uncertainty
+            - beliefs.uncertainties[sensing_agents, sensing_tasks]
+            + (
+                before_sensing_aoi - beliefs.aoi[sensing_agents, sensing_tasks]
+            )
+            / max(self.cfg.task_max_aoi, 1e-6)
+        )
+
+        delivered_messages = self._deliver_due_messages()
+        fusion_stats = self._fuse_messages(delivered_messages)
+        outgoing_messages = self._build_cognition_messages(
+            sensing_agents,
+            sensing_tasks,
+            local_information_gains,
+        )
+        transmission_stats = self._require_communication().submit(outgoing_messages)
+        zero_delay_messages = self._deliver_due_messages()
+        if zero_delay_messages:
+            zero_delay_fusion = self._fuse_messages(zero_delay_messages)
+            delivered_messages.extend(zero_delay_messages)
+            fusion_stats["accepted"] += zero_delay_fusion["accepted"]
+            fusion_stats["quality_gain"] += zero_delay_fusion["quality_gain"]
 
         repeat_ratio = float(repeat_count / max(len(truth), 1))
         active_count = max(int(np.sum(self.active_mask)), 1)
@@ -138,14 +173,26 @@ class ResourceCognitionEnv:
         )
         sensing_cost = self.cfg.cognition_sensing_cost * float(sensing_tasks.size)
         repeat_penalty = self.cfg.cognition_repeat_penalty * repeat_ratio
+        communication_penalty = (
+            self.cfg.cognition_message_cost * float(transmission_stats.attempted)
+        )
+        fusion_reward = (
+            self.cfg.cognition_fusion_reward_weight * float(fusion_stats["quality_gain"])
+        )
         reward = float(
             self.cfg.reward_weight_uncertainty_gain * sensing_gain["uncertainty_gain"]
             + self.cfg.reward_weight_aoi_gain * sensing_gain["aoi_gain"]
+            + fusion_reward
             - sensing_cost
             - repeat_penalty
+            - communication_penalty
             - self.cfg.reward_weight_movement_cost * movement_cost
         )
-        progress = sensing_gain["uncertainty_gain"] + sensing_gain["aoi_gain"]
+        progress = (
+            sensing_gain["uncertainty_gain"]
+            + sensing_gain["aoi_gain"]
+            + float(fusion_stats["quality_gain"])
+        )
         self.no_improve_steps = 0 if progress > 1e-6 else self.no_improve_steps + 1
         done, reason = self._check_done()
         info = self._build_info(
@@ -164,6 +211,18 @@ class ResourceCognitionEnv:
                 "movement_cost": movement_cost,
                 "sensing_cost": float(sensing_cost),
                 "repeat_penalty": float(repeat_penalty),
+                "messages_attempted": int(transmission_stats.attempted),
+                "messages_dropped": int(transmission_stats.dropped),
+                "messages_delivered": int(len(delivered_messages)),
+                "messages_fused": int(fusion_stats["accepted"]),
+                "messages_pending": int(self._require_communication().pending_count),
+                "message_acceptance_ratio": float(
+                    fusion_stats["accepted"] / max(len(delivered_messages), 1)
+                ),
+                "communication_cost": float(communication_penalty),
+                "communication_penalty": float(communication_penalty),
+                "fusion_gain": float(fusion_stats["quality_gain"]),
+                "fusion_reward": float(fusion_reward),
             }
         )
         self._last_info = info
@@ -261,6 +320,94 @@ class ResourceCognitionEnv:
             agent_ids.append(agent_id)
             task_ids.append(int(self._slot_task_indices[agent_id][slot]))
         return np.asarray(agent_ids, dtype=np.int64), np.asarray(task_ids, dtype=np.int64)
+
+    def _build_cognition_messages(
+        self,
+        sensing_agents: np.ndarray,
+        sensing_tasks: np.ndarray,
+        local_information_gains: np.ndarray,
+    ) -> List[CognitionMessage]:
+        if not self.cfg.cognition_enable_communication or sensing_tasks.size == 0:
+            return []
+        truth, beliefs = self._require_state()
+        messages: List[CognitionMessage] = []
+        for sender_id, task_id, information_gain in zip(
+            sensing_agents, sensing_tasks, local_information_gains
+        ):
+            sender_id = int(sender_id)
+            task_id = int(task_id)
+            confidence = float(beliefs.confidence[sender_id, task_id])
+            aoi = float(beliefs.aoi[sender_id, task_id])
+            freshness = float(np.exp(-self.cfg.cognition_freshness_decay * aoi))
+            message_value = float(
+                truth.priorities[task_id]
+                * max(float(information_gain), 0.0)
+                * confidence
+                * freshness
+            )
+            if message_value < self.cfg.cognition_message_value_threshold:
+                continue
+
+            sender_xy = self.uav_positions[sender_id, :2]
+            receiver_distances = {
+                receiver_id: float(
+                    np.linalg.norm(self.uav_positions[receiver_id, :2] - sender_xy)
+                )
+                for receiver_id in range(self.num_agents)
+                if receiver_id != sender_id and self.active_mask[receiver_id]
+            }
+            receivers = sorted(
+                (
+                    receiver_id
+                    for receiver_id, distance in receiver_distances.items()
+                    if distance <= self.cfg.cognition_communication_radius
+                ),
+                key=receiver_distances.get,
+            )[: self.cfg.cognition_max_messages_per_agent]
+            for receiver_id in receivers:
+                messages.append(
+                    CognitionMessage(
+                        sender_id=sender_id,
+                        receiver_id=int(receiver_id),
+                        task_id=task_id,
+                        estimate=float(beliefs.estimates[sender_id, task_id]),
+                        uncertainty=float(beliefs.uncertainties[sender_id, task_id]),
+                        confidence=confidence,
+                        aoi=aoi,
+                        created_step=self.current_step,
+                        arrival_step=(
+                            self.current_step
+                            + self._require_communication().delay_steps
+                        ),
+                    )
+                )
+        return messages
+
+    def _deliver_due_messages(self) -> List[CognitionMessage]:
+        if not self.cfg.cognition_enable_communication:
+            return []
+        return self._require_communication().deliver(self.current_step)
+
+    def _fuse_messages(self, messages: List[CognitionMessage]) -> Dict[str, float]:
+        _, beliefs = self._require_state()
+        accepted = 0
+        quality_gain = 0.0
+        for message in messages:
+            result = beliefs.fuse_neighbor_message(
+                receiver_id=message.receiver_id,
+                task_id=message.task_id,
+                estimate=message.estimate,
+                uncertainty=message.uncertainty,
+                confidence=message.confidence,
+                message_aoi=message.aoi,
+                source_update_step=message.created_step,
+                current_step=self.current_step,
+                confidence_threshold=self.cfg.cognition_fusion_confidence_threshold,
+                freshness_decay=self.cfg.cognition_freshness_decay,
+            )
+            accepted += int(result["accepted"])
+            quality_gain += float(result["quality_gain"])
+        return {"accepted": float(accepted), "quality_gain": float(quality_gain)}
 
     def _init_uavs(self) -> None:
         if self.cfg.uav_init_mode == "circle":
@@ -387,3 +534,8 @@ class ResourceCognitionEnv:
         if self.task_truth is None or self.local_beliefs is None:
             raise RuntimeError("Call reset before accessing task state.")
         return self.task_truth, self.local_beliefs
+
+    def _require_communication(self) -> NeighborCommunicationModel:
+        if self.communication_model is None:
+            raise RuntimeError("Call reset before accessing communication state.")
+        return self.communication_model

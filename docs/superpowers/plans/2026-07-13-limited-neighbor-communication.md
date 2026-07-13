@@ -22,31 +22,31 @@
 - Modify: `configs/scenario_config.py`
 - Create: `envs/communication_model.py`
 
-- [ ] Add radius, delay, loss, cost, message cap, value threshold, fusion threshold, and freshness decay configuration.
-- [ ] Implement immutable `CognitionMessage` records.
-- [ ] Implement reproducible packet loss, pending queues, and due-message delivery.
-- [ ] Verify radius-independent transport behavior for delay zero, delay one, and full loss.
+- [x] Add radius, delay, loss, cost, message cap, value threshold, fusion threshold, and freshness decay configuration.
+- [x] Implement immutable `CognitionMessage` records.
+- [x] Implement reproducible packet loss, pending queues, and due-message delivery.
+- [x] Verify radius-independent transport behavior for delay zero, delay one, and full loss.
 
 ### Task 2: Receiver-Side Belief Fusion
 
 **Files:**
 - Modify: `envs/task_model.py`
 
-- [ ] Add confidence- and freshness-aware receiver fusion.
-- [ ] Reject stale, weak, and non-improving messages.
-- [ ] Return accepted flag and local quality gain.
-- [ ] Verify that one receiver update never changes another UAV's belief.
+- [x] Add confidence- and freshness-aware receiver fusion.
+- [x] Reject stale, weak, and non-improving messages.
+- [x] Return accepted flag and local quality gain.
+- [x] Verify that one receiver update never changes another UAV's belief.
 
 ### Task 3: Environment Integration
 
 **Files:**
 - Modify: `envs/resource_cognition_env.py`
 
-- [ ] Build sender-side message values from local sensing results.
-- [ ] Restrict recipients to the communication radius and nearest message cap.
-- [ ] Deliver queued messages before new sends and zero-delay messages after sends.
-- [ ] Subtract attempted communication cost and add fusion gain reward.
-- [ ] Expose communication counts, pending queue size, acceptance ratio, and fusion gain.
+- [x] Build sender-side message values from local sensing results.
+- [x] Restrict recipients to the communication radius and nearest message cap.
+- [x] Deliver queued messages before new sends and zero-delay messages after sends.
+- [x] Subtract attempted communication cost and add fusion gain reward.
+- [x] Expose communication counts, pending queue size, acceptance ratio, and fusion gain.
 
 ### Task 4: Metrics and Verification
 
@@ -54,6 +54,6 @@
 - Modify: `envs/metrics.py`
 - Modify: `README.md`
 
-- [ ] Aggregate message attempts, deliveries, acceptance ratio, communication cost, and fusion gain.
-- [ ] Document event-triggered communication semantics and command.
-- [ ] Run syntax, structure, focused communication behavior, resource-cognition training, and legacy MCG-PPO regression checks.
+- [x] Aggregate message attempts, deliveries, acceptance ratio, communication cost, and fusion gain.
+- [x] Document event-triggered communication semantics and command.
+- [x] Run syntax, structure, focused communication behavior, resource-cognition training, and legacy MCG-PPO regression checks.

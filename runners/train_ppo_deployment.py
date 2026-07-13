@@ -594,7 +594,17 @@ def run_registered_shared_training(
         }
         update_logs.append(log_record)
 
-        if scenario_cfg.use_trusted_sensing or scenario_cfg.use_resource_cognition:
+        if scenario_cfg.use_resource_cognition:
+            print(
+                f"[{method_name}][Update {update_idx:04d}] "
+                f"quality={rollout_summary.get('mean_final_cognitive_quality', 0.0):.4f}  "
+                f"uncertainty={rollout_summary.get('mean_final_task_uncertainty', 0.0):.4f}  "
+                f"aoi={rollout_summary.get('mean_final_task_aoi', 0.0):.2f}  "
+                f"messages={rollout_summary.get('mean_total_messages_attempted', 0.0):.1f}  "
+                f"fused={rollout_summary.get('mean_total_messages_fused', 0.0):.1f}  "
+                f"return={rollout_summary.get('mean_episode_return', 0.0):.3f}"
+            )
+        elif scenario_cfg.use_trusted_sensing:
             print(
                 f"[{method_name}][Update {update_idx:04d}] "
                 f"quality={rollout_summary.get('mean_final_cognitive_quality', 0.0):.4f}  "
@@ -633,7 +643,14 @@ def run_registered_shared_training(
             eval_score = get_eval_selection_score(eval_summary, scenario_cfg)
             eval_summary["selection_metric"] = best_eval_metric
             eval_summary["selection_score"] = eval_score
-            if scenario_cfg.use_trusted_sensing or scenario_cfg.use_resource_cognition:
+            if scenario_cfg.use_resource_cognition:
+                print(
+                    f"  [Eval-{method_name}] {best_eval_metric}={eval_score:.4f}  "
+                    f"uncertainty={eval_summary.get('mean_final_task_uncertainty', 0.0):.4f}  "
+                    f"messages={eval_summary.get('mean_total_messages_attempted', 0.0):.1f}  "
+                    f"accept={eval_summary.get('mean_message_acceptance_ratio', 0.0):.3f}"
+                )
+            elif scenario_cfg.use_trusted_sensing:
                 print(
                     f"  [Eval-{method_name}] {best_eval_metric}={eval_score:.4f}  "
                     f"uncertainty={eval_summary.get('mean_final_task_uncertainty', 0.0):.4f}  "
