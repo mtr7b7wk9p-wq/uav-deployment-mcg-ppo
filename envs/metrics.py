@@ -42,6 +42,8 @@ class EpisodeMetrics:
     task_aoi: List[float] = field(default_factory=list)
     cognitive_quality: List[float] = field(default_factory=list)
     estimation_error: List[float] = field(default_factory=list)
+    spectrum_estimation_error: List[float] = field(default_factory=list)
+    demand_estimation_error: List[float] = field(default_factory=list)
     repeat_sensing_ratio: List[float] = field(default_factory=list)
     messages_attempted: List[int] = field(default_factory=list)
     messages_dropped: List[int] = field(default_factory=list)
@@ -49,6 +51,10 @@ class EpisodeMetrics:
     messages_fused: List[int] = field(default_factory=list)
     communication_cost: List[float] = field(default_factory=list)
     fusion_gain: List[float] = field(default_factory=list)
+    scheduling_team_utility: List[float] = field(default_factory=list)
+    scheduling_estimated_utility: List[float] = field(default_factory=list)
+    scheduling_conflict_count: List[int] = field(default_factory=list)
+    scheduling_energy_consumption: List[float] = field(default_factory=list)
     reward_component_history: Dict[str, List[float]] = field(default_factory=dict)
 
     final_total_distance_per_uav: Optional[np.ndarray] = None
@@ -60,6 +66,9 @@ class EpisodeMetrics:
     final_task_aoi: float = 0.0
     final_cognitive_quality: float = 0.0
     final_estimation_error: float = 0.0
+    final_spectrum_estimation_error: float = 0.0
+    final_demand_estimation_error: float = 0.0
+    final_scheduling_team_utility: float = 0.0
     episode_length: int = 0
     done_reason: str = "unknown"
 
@@ -73,6 +82,12 @@ class EpisodeMetrics:
         self.task_aoi.append(float(info.get("mean_task_aoi", 0.0)))
         self.cognitive_quality.append(float(info.get("cognitive_quality", 0.0)))
         self.estimation_error.append(float(info.get("mean_estimation_error", 0.0)))
+        self.spectrum_estimation_error.append(
+            float(info.get("mean_spectrum_estimation_error", 0.0))
+        )
+        self.demand_estimation_error.append(
+            float(info.get("mean_demand_estimation_error", 0.0))
+        )
         self.repeat_sensing_ratio.append(float(info.get("repeat_sensing_ratio", 0.0)))
         self.messages_attempted.append(int(info.get("messages_attempted", 0)))
         self.messages_dropped.append(int(info.get("messages_dropped", 0)))
@@ -80,6 +95,18 @@ class EpisodeMetrics:
         self.messages_fused.append(int(info.get("messages_fused", 0)))
         self.communication_cost.append(float(info.get("communication_cost", 0.0)))
         self.fusion_gain.append(float(info.get("fusion_gain", 0.0)))
+        self.scheduling_team_utility.append(
+            float(info.get("scheduling_team_utility", 0.0))
+        )
+        self.scheduling_estimated_utility.append(
+            float(info.get("scheduling_estimated_utility", 0.0))
+        )
+        self.scheduling_conflict_count.append(
+            int(info.get("scheduling_conflict_count", 0))
+        )
+        self.scheduling_energy_consumption.append(
+            float(info.get("scheduling_energy_consumption", 0.0))
+        )
 
         for key, value in info.items():
             if _should_collect_reward_key(key, value):
@@ -98,6 +125,15 @@ class EpisodeMetrics:
         self.final_task_aoi = float(info.get("mean_task_aoi", self.final_task_aoi))
         self.final_cognitive_quality = float(info.get("cognitive_quality", self.final_cognitive_quality))
         self.final_estimation_error = float(info.get("mean_estimation_error", self.final_estimation_error))
+        self.final_spectrum_estimation_error = float(
+            info.get("mean_spectrum_estimation_error", self.final_spectrum_estimation_error)
+        )
+        self.final_demand_estimation_error = float(
+            info.get("mean_demand_estimation_error", self.final_demand_estimation_error)
+        )
+        self.final_scheduling_team_utility = float(
+            info.get("scheduling_team_utility", self.final_scheduling_team_utility)
+        )
         self.episode_length = int(info.get("step", len(self.rewards)))
         self.done_reason = str(info.get("termination_reason", self.done_reason))
 
@@ -147,6 +183,16 @@ class EpisodeMetrics:
             "final_task_aoi": self.final_task_aoi,
             "final_cognitive_quality": self.final_cognitive_quality,
             "final_estimation_error": self.final_estimation_error,
+            "final_spectrum_estimation_error": self.final_spectrum_estimation_error,
+            "final_demand_estimation_error": self.final_demand_estimation_error,
+            "final_scheduling_team_utility": self.final_scheduling_team_utility,
+            "mean_scheduling_team_utility": float(
+                np.mean(self.scheduling_team_utility)
+            ) if self.scheduling_team_utility else 0.0,
+            "total_scheduling_conflicts": int(np.sum(self.scheduling_conflict_count)),
+            "total_scheduling_energy_consumption": float(
+                np.sum(self.scheduling_energy_consumption)
+            ),
             "total_messages_attempted": total_messages_attempted,
             "total_messages_dropped": total_messages_dropped,
             "total_messages_delivered": total_messages_delivered,
@@ -219,6 +265,11 @@ class MetricTracker:
                 "mean_final_task_aoi": 0.0,
                 "mean_final_cognitive_quality": 0.0,
                 "mean_final_estimation_error": 0.0,
+                "mean_final_spectrum_estimation_error": 0.0,
+                "mean_final_demand_estimation_error": 0.0,
+                "mean_final_scheduling_team_utility": 0.0,
+                "mean_total_scheduling_conflicts": 0.0,
+                "mean_total_scheduling_energy_consumption": 0.0,
                 "mean_total_messages_attempted": 0.0,
                 "mean_total_messages_dropped": 0.0,
                 "mean_total_messages_delivered": 0.0,
@@ -249,6 +300,26 @@ class MetricTracker:
         final_task_aoi = np.array([x.get("final_task_aoi", 0.0) for x in self.episode_summaries], dtype=np.float32)
         final_cognitive_quality = np.array([x.get("final_cognitive_quality", 0.0) for x in self.episode_summaries], dtype=np.float32)
         final_estimation_error = np.array([x.get("final_estimation_error", 0.0) for x in self.episode_summaries], dtype=np.float32)
+        final_spectrum_estimation_error = np.array(
+            [x.get("final_spectrum_estimation_error", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
+        final_demand_estimation_error = np.array(
+            [x.get("final_demand_estimation_error", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
+        mean_scheduling_team_utility = np.array(
+            [x.get("mean_scheduling_team_utility", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
+        total_scheduling_conflicts = np.array(
+            [x.get("total_scheduling_conflicts", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
+        total_scheduling_energy_consumption = np.array(
+            [x.get("total_scheduling_energy_consumption", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
         total_messages_attempted = np.array([x.get("total_messages_attempted", 0.0) for x in self.episode_summaries], dtype=np.float32)
         total_messages_dropped = np.array([x.get("total_messages_dropped", 0.0) for x in self.episode_summaries], dtype=np.float32)
         total_messages_delivered = np.array([x.get("total_messages_delivered", 0.0) for x in self.episode_summaries], dtype=np.float32)
@@ -293,6 +364,21 @@ class MetricTracker:
             "mean_final_task_aoi": float(np.mean(final_task_aoi)),
             "mean_final_cognitive_quality": float(np.mean(final_cognitive_quality)),
             "mean_final_estimation_error": float(np.mean(final_estimation_error)),
+            "mean_final_spectrum_estimation_error": float(
+                np.mean(final_spectrum_estimation_error)
+            ),
+            "mean_final_demand_estimation_error": float(
+                np.mean(final_demand_estimation_error)
+            ),
+            "mean_final_scheduling_team_utility": float(
+                np.mean(mean_scheduling_team_utility)
+            ),
+            "mean_total_scheduling_conflicts": float(
+                np.mean(total_scheduling_conflicts)
+            ),
+            "mean_total_scheduling_energy_consumption": float(
+                np.mean(total_scheduling_energy_consumption)
+            ),
             "mean_total_messages_attempted": float(np.mean(total_messages_attempted)),
             "mean_total_messages_dropped": float(np.mean(total_messages_dropped)),
             "mean_total_messages_delivered": float(np.mean(total_messages_delivered)),

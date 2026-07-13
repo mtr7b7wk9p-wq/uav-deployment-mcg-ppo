@@ -19,6 +19,10 @@ class CognitionMessage:
     aoi: float
     created_step: int
     arrival_step: int
+    demand_estimate: float = 0.5
+    demand_uncertainty: float = 1.0
+    demand_confidence: float = 0.0
+    demand_aoi: float = 0.0
 
 
 @dataclass(frozen=True)

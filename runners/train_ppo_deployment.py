@@ -155,13 +155,14 @@ def run_one_episode_collect_shared(
         )
 
         next_obs_dict, reward, done, info = env.step(actions)
+        training_reward = info.get("per_agent_rewards", reward)
 
         buffer.add_multi_agent_step(
             local_obs_batch=local_obs,
             action_mask_batch=action_mask,
             action_batch=actions,
             log_prob_batch=log_probs,
-            reward=reward,
+            reward=training_reward,
             done=done,
             value_batch=values,
         )

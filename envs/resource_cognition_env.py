@@ -22,6 +22,7 @@ class ResourceCognitionEnv:
     """Local-observation environment for explicit task sensing."""
 
     MOVE_ACTIONS = 5
+    SENSE_ACTION_START = MOVE_ACTIONS
 
     def __init__(self, config: Optional[ScenarioConfig] = None):
         self.cfg = config or ScenarioConfig(use_resource_cognition=True)
@@ -66,6 +67,9 @@ class ResourceCognitionEnv:
         true_states = self.rng.integers(
             0, 2, size=self.cfg.num_cognition_tasks
         ).astype(np.float32)
+        demand_levels = self.rng.beta(
+            2.0, 2.0, size=self.cfg.num_cognition_tasks
+        ).astype(np.float32)
         priorities = self.rng.uniform(
             self.cfg.task_priority_min,
             self.cfg.task_priority_max,
@@ -75,6 +79,7 @@ class ResourceCognitionEnv:
             positions_xy=positions,
             band_ids=band_ids,
             true_states=true_states,
+            demand_levels=demand_levels,
             priorities=priorities,
         )
         self.local_beliefs = LocalBeliefBatch(
@@ -83,6 +88,8 @@ class ResourceCognitionEnv:
             initial_uncertainty=self.cfg.task_initial_uncertainty,
             initial_aoi=self.cfg.task_initial_aoi,
             max_aoi=self.cfg.task_max_aoi,
+            spectrum_quality_weight=self.cfg.cognition_spectrum_quality_weight,
+            demand_quality_weight=self.cfg.cognition_demand_quality_weight,
         )
         self.communication_model = NeighborCommunicationModel(
             np.random.default_rng(communication_seed),
@@ -114,15 +121,23 @@ class ResourceCognitionEnv:
             raise ValueError("action out of range.")
 
         sensing_agents, sensing_tasks = self._decode_sensing_actions(action_array)
+        schedule_agents, schedule_tasks = self._decode_schedule_actions(action_array)
+        repeat_cost_units = np.zeros((self.num_agents,), dtype=np.float32)
         if sensing_tasks.size:
-            _, task_counts = np.unique(sensing_tasks, return_counts=True)
+            unique_tasks, task_counts = np.unique(sensing_tasks, return_counts=True)
             repeat_count = int(np.sum(np.maximum(task_counts - 1, 0)))
+            count_by_task = dict(zip(unique_tasks.tolist(), task_counts.tolist()))
+            for agent_id, task_id in zip(sensing_agents, sensing_tasks):
+                count = int(count_by_task[int(task_id)])
+                if count > 1:
+                    repeat_cost_units[int(agent_id)] = (count - 1) / count / len(truth)
         else:
             repeat_count = 0
 
         self.current_step += 1
         move_distances = self._apply_movement(action_array)
         beliefs.age(self.cfg.cognition_aoi_increment)
+        quality_before_sensing = self._per_agent_quality()
 
         if sensing_tasks.size:
             noise = self.rng.normal(
@@ -131,27 +146,34 @@ class ResourceCognitionEnv:
                 size=sensing_tasks.shape,
             ).astype(np.float32)
             observations = truth.true_states[sensing_tasks] + noise
+            demand_noise = self.rng.normal(
+                0.0,
+                self.cfg.cognition_observation_noise_std,
+                size=sensing_tasks.shape,
+            ).astype(np.float32)
+            demand_observations = truth.demand_levels[sensing_tasks] + demand_noise
         else:
             observations = np.zeros((0,), dtype=np.float32)
-        before_sensing_uncertainty = beliefs.uncertainties[
-            sensing_agents, sensing_tasks
-        ].copy()
-        before_sensing_aoi = beliefs.aoi[sensing_agents, sensing_tasks].copy()
+            demand_observations = np.zeros((0,), dtype=np.float32)
         sensing_gain = beliefs.apply_local_sensing(
             sensing_agents,
             sensing_tasks,
             observations,
+            demand_observations=demand_observations,
             uncertainty_reduction=self.cfg.cognition_task_uncertainty_reduction,
+            demand_uncertainty_reduction=self.cfg.cognition_demand_uncertainty_reduction,
             current_step=self.current_step,
         )
-        local_information_gains = (
-            before_sensing_uncertainty
-            - beliefs.uncertainties[sensing_agents, sensing_tasks]
-            + (
-                before_sensing_aoi - beliefs.aoi[sensing_agents, sensing_tasks]
-            )
-            / max(self.cfg.task_max_aoi, 1e-6)
+        quality_after_sensing = self._per_agent_quality()
+        team_quality_after_sensing = float(np.mean(quality_after_sensing))
+        counterfactual_quality_without_agent = (
+            team_quality_after_sensing
+            - (quality_after_sensing - quality_before_sensing) / self.num_agents
         )
+        sensing_difference = (
+            team_quality_after_sensing - counterfactual_quality_without_agent
+        ).astype(np.float32)
+        local_information_gains = sensing_gain["information_gain"]
 
         delivered_messages = self._deliver_due_messages()
         fusion_stats = self._fuse_messages(delivered_messages)
@@ -160,6 +182,10 @@ class ResourceCognitionEnv:
             sensing_tasks,
             local_information_gains,
         )
+        messages_attempted_by_sender = np.bincount(
+            [message.sender_id for message in outgoing_messages],
+            minlength=self.num_agents,
+        ).astype(np.float32)
         transmission_stats = self._require_communication().submit(outgoing_messages)
         zero_delay_messages = self._deliver_due_messages()
         if zero_delay_messages:
@@ -167,6 +193,14 @@ class ResourceCognitionEnv:
             delivered_messages.extend(zero_delay_messages)
             fusion_stats["accepted"] += zero_delay_fusion["accepted"]
             fusion_stats["quality_gain"] += zero_delay_fusion["quality_gain"]
+            fusion_stats["quality_gain_by_sender"] += zero_delay_fusion[
+                "quality_gain_by_sender"
+            ]
+            fusion_stats["accepted_by_sender"] += zero_delay_fusion[
+                "accepted_by_sender"
+            ]
+
+        scheduling_stats = self._execute_scheduling(schedule_agents, schedule_tasks)
 
         repeat_ratio = float(repeat_count / max(len(truth), 1))
         active_count = max(int(np.sum(self.active_mask)), 1)
@@ -181,19 +215,69 @@ class ResourceCognitionEnv:
         fusion_reward = (
             self.cfg.cognition_fusion_reward_weight * float(fusion_stats["quality_gain"])
         )
-        reward = float(
+        shared_reward = float(
             self.cfg.reward_weight_uncertainty_gain * sensing_gain["uncertainty_gain"]
             + self.cfg.reward_weight_aoi_gain * sensing_gain["aoi_gain"]
             + fusion_reward
+            + self.cfg.cognition_scheduling_reward_weight
+            * len(truth)
+            * scheduling_stats["team_utility"]
+            - scheduling_stats["energy_penalty"]
+            - scheduling_stats["conflict_penalty"]
             - sensing_cost
             - repeat_penalty
             - communication_penalty
             - self.cfg.reward_weight_movement_cost * movement_cost
         )
+        per_agent_rewards = None
+        if self.cfg.cognition_use_per_agent_rewards:
+            task_scale = float(len(truth))
+            sensing_rewards = (
+                self.cfg.cognition_difference_reward_weight
+                * task_scale
+                * sensing_difference
+            )
+            fusion_rewards = (
+                self.cfg.cognition_fusion_reward_weight
+                * task_scale
+                * fusion_stats["quality_gain_by_sender"]
+                / self.num_agents
+            )
+            movement_costs = (
+                self.cfg.reward_weight_movement_cost
+                * move_distances
+                / max(self.cfg.step_size(), 1e-6)
+            )
+            sensing_costs = np.zeros((self.num_agents,), dtype=np.float32)
+            sensing_costs[sensing_agents] = self.cfg.cognition_sensing_cost
+            repeat_costs = self.cfg.cognition_repeat_penalty * repeat_cost_units
+            communication_costs = (
+                self.cfg.cognition_message_cost * messages_attempted_by_sender
+            )
+            scheduling_rewards = (
+                self.cfg.cognition_scheduling_reward_weight
+                * task_scale
+                * scheduling_stats["difference_by_agent"]
+            )
+            per_agent_rewards = (
+                sensing_rewards
+                + fusion_rewards
+                + scheduling_rewards
+                - movement_costs
+                - sensing_costs
+                - repeat_costs
+                - communication_costs
+                - scheduling_stats["energy_penalty_by_agent"]
+                - scheduling_stats["conflict_penalty_by_agent"]
+            ).astype(np.float32)
+            reward = float(np.mean(per_agent_rewards))
+        else:
+            reward = shared_reward
         progress = (
             sensing_gain["uncertainty_gain"]
             + sensing_gain["aoi_gain"]
             + float(fusion_stats["quality_gain"])
+            + float(scheduling_stats["team_utility"])
         )
         self.no_improve_steps = 0 if progress > 1e-6 else self.no_improve_steps + 1
         done, reason = self._check_done()
@@ -225,8 +309,68 @@ class ResourceCognitionEnv:
                 "communication_penalty": float(communication_penalty),
                 "fusion_gain": float(fusion_stats["quality_gain"]),
                 "fusion_reward": float(fusion_reward),
+                "scheduled_task_count": int(scheduling_stats["scheduled_count"]),
+                "scheduling_team_utility": float(scheduling_stats["team_utility"]),
+                "scheduling_estimated_utility": float(
+                    scheduling_stats["estimated_team_utility"]
+                ),
+                "scheduling_reward": float(
+                    self.cfg.cognition_scheduling_reward_weight
+                    * len(truth)
+                    * scheduling_stats["team_utility"]
+                ),
+                "scheduling_conflict_count": int(scheduling_stats["conflict_count"]),
+                "scheduling_conflict_penalty": float(
+                    scheduling_stats["conflict_penalty"]
+                ),
+                "scheduling_energy_consumption": float(
+                    scheduling_stats["energy_consumption"]
+                ),
+                "scheduling_energy_penalty": float(
+                    scheduling_stats["energy_penalty"]
+                ),
+                "per_agent_scheduling_difference": scheduling_stats[
+                    "difference_by_agent"
+                ].copy(),
+                "per_agent_scheduled_task": scheduling_stats[
+                    "scheduled_task_by_agent"
+                ].copy(),
+                "shared_resource_reward": float(shared_reward),
+                "sensing_difference_mean": float(np.mean(sensing_difference)),
+                "counterfactual_team_quality_without_agent": (
+                    counterfactual_quality_without_agent.copy()
+                ),
             }
         )
+        if per_agent_rewards is not None:
+            info.update(
+                {
+                    "per_agent_rewards": per_agent_rewards.copy(),
+                    "per_agent_sensing_difference": sensing_difference.copy(),
+                    "per_agent_fusion_gain_by_sender": fusion_stats[
+                        "quality_gain_by_sender"
+                    ].copy(),
+                    "per_agent_messages_attempted": messages_attempted_by_sender.copy(),
+                    "reward_scheduling": float(np.mean(scheduling_rewards)),
+                    "reward_counterfactual_sensing": float(np.mean(sensing_rewards)),
+                    "reward_sender_fusion": float(np.mean(fusion_rewards)),
+                    "counterfactual_movement_penalty": float(
+                        np.mean(movement_costs)
+                    ),
+                    "counterfactual_sensing_penalty": float(np.mean(sensing_costs)),
+                    "counterfactual_repeat_penalty": float(np.mean(repeat_costs)),
+                    "counterfactual_communication_penalty": float(
+                        np.mean(communication_costs)
+                    ),
+                    "counterfactual_scheduling_energy_penalty": float(
+                        np.mean(scheduling_stats["energy_penalty_by_agent"])
+                    ),
+                    "counterfactual_scheduling_conflict_penalty": float(
+                        np.mean(scheduling_stats["conflict_penalty_by_agent"])
+                    ),
+                    "per_agent_reward_std": float(np.std(per_agent_rewards)),
+                }
+            )
         self._last_info = info
         return self._build_output(), reward, done, info
 
@@ -248,13 +392,14 @@ class ResourceCognitionEnv:
                 self.uav_positions[i, 2] / self.cfg.uav_h_max,
                 self.remaining_time[i] / max(self.cfg.uav_max_time, 1e-6),
                 self.current_step / max(self.cfg.max_steps, 1),
-                beliefs.local_quality(i),
+                beliefs.local_quality(i, use_task_priorities=False),
             ],
             dtype=np.float32,
         )
-        task_features = np.zeros((self.cfg.cognition_max_task_slots, 8), dtype=np.float32)
+        task_features = np.zeros((self.cfg.cognition_max_task_slots, 12), dtype=np.float32)
         for slot, task_id in enumerate(visible):
             rel = truth.positions_xy[task_id] - position
+            link_quality = float(np.exp(-distances[task_id] / max(self.cfg.sensing_radius, 1e-6)))
             task_features[slot] = np.array(
                 [
                     rel[0] / self.cfg.obs_radius,
@@ -263,13 +408,17 @@ class ResourceCognitionEnv:
                     beliefs.estimates[i, task_id],
                     beliefs.uncertainties[i, task_id],
                     beliefs.aoi[i, task_id] / max(self.cfg.task_max_aoi, 1e-6),
-                    truth.priorities[task_id] / max(self.cfg.task_priority_max, 1e-6),
                     beliefs.confidence[i, task_id],
+                    beliefs.demand_estimates[i, task_id],
+                    beliefs.demand_uncertainties[i, task_id],
+                    beliefs.demand_aoi[i, task_id] / max(self.cfg.task_max_aoi, 1e-6),
+                    beliefs.demand_confidence[i, task_id],
+                    link_quality,
                 ],
                 dtype=np.float32,
             )
 
-        neighbor_features = np.zeros((self.cfg.max_obs_uavs, 8), dtype=np.float32)
+        neighbor_features = np.zeros((self.cfg.max_obs_uavs, 12), dtype=np.float32)
         received = [
             (sender_id, message, accepted)
             for sender_id, (message, accepted) in self._received_message_cache[i].items()
@@ -290,6 +439,11 @@ class ResourceCognitionEnv:
                 message.uncertainty,
                 message.confidence,
                 message_age / max(self.cfg.task_max_aoi, 1e-6),
+                message.demand_estimate,
+                message.demand_uncertainty,
+                message.demand_confidence,
+                min(max(message.demand_aoi, 0.0), self.cfg.task_max_aoi)
+                / max(self.cfg.task_max_aoi, 1e-6),
                 1.0 if accepted else 0.0,
                 1.0,
             ]
@@ -305,11 +459,16 @@ class ResourceCognitionEnv:
                 truth.positions_xy.flatten(),
                 truth.band_ids.astype(np.float32),
                 truth.true_states,
+                truth.demand_levels,
                 truth.priorities,
                 beliefs.estimates.flatten(),
                 beliefs.uncertainties.flatten(),
                 (beliefs.aoi / max(self.cfg.task_max_aoi, 1e-6)).flatten(),
                 beliefs.confidence.flatten(),
+                beliefs.demand_estimates.flatten(),
+                beliefs.demand_uncertainties.flatten(),
+                (beliefs.demand_aoi / max(self.cfg.task_max_aoi, 1e-6)).flatten(),
+                beliefs.demand_confidence.flatten(),
                 self.uav_positions.flatten(),
                 self.remaining_time / max(self.cfg.uav_max_time, 1e-6),
                 np.array(
@@ -319,15 +478,30 @@ class ResourceCognitionEnv:
         ).astype(np.float32)
 
     def _decode_sensing_actions(self, actions: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        return self._decode_task_actions(actions, self.SENSE_ACTION_START)
+
+    def _decode_schedule_actions(self, actions: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        if not self.cfg.cognition_enable_scheduling:
+            return np.zeros((0,), dtype=np.int64), np.zeros((0,), dtype=np.int64)
+        return self._decode_task_actions(actions, self._schedule_action_start())
+
+    def _decode_task_actions(
+        self,
+        actions: np.ndarray,
+        action_start: int,
+    ) -> Tuple[np.ndarray, np.ndarray]:
         agent_ids: List[int] = []
         task_ids: List[int] = []
         for agent_id, action in enumerate(actions):
-            slot = int(action) - self.MOVE_ACTIONS
+            slot = int(action) - int(action_start)
             if slot < 0 or slot >= len(self._slot_task_indices[agent_id]):
                 continue
             agent_ids.append(agent_id)
             task_ids.append(int(self._slot_task_indices[agent_id][slot]))
         return np.asarray(agent_ids, dtype=np.int64), np.asarray(task_ids, dtype=np.int64)
+
+    def _schedule_action_start(self) -> int:
+        return int(self.SENSE_ACTION_START + self.cfg.cognition_max_task_slots)
 
     def _build_cognition_messages(
         self,
@@ -387,6 +561,14 @@ class ResourceCognitionEnv:
                             self.current_step
                             + self._require_communication().delay_steps
                         ),
+                        demand_estimate=float(beliefs.demand_estimates[sender_id, task_id]),
+                        demand_uncertainty=float(
+                            beliefs.demand_uncertainties[sender_id, task_id]
+                        ),
+                        demand_confidence=float(
+                            beliefs.demand_confidence[sender_id, task_id]
+                        ),
+                        demand_aoi=float(beliefs.demand_aoi[sender_id, task_id]),
                     )
                 )
         return messages
@@ -396,10 +578,12 @@ class ResourceCognitionEnv:
             return []
         return self._require_communication().deliver(self.current_step)
 
-    def _fuse_messages(self, messages: List[CognitionMessage]) -> Dict[str, float]:
+    def _fuse_messages(self, messages: List[CognitionMessage]) -> Dict[str, Any]:
         _, beliefs = self._require_state()
         accepted = 0
         quality_gain = 0.0
+        quality_gain_by_sender = np.zeros((self.num_agents,), dtype=np.float32)
+        accepted_by_sender = np.zeros((self.num_agents,), dtype=np.float32)
         for message in messages:
             result = beliefs.fuse_neighbor_message(
                 receiver_id=message.receiver_id,
@@ -408,6 +592,10 @@ class ResourceCognitionEnv:
                 uncertainty=message.uncertainty,
                 confidence=message.confidence,
                 message_aoi=message.aoi,
+                demand_estimate=message.demand_estimate,
+                demand_uncertainty=message.demand_uncertainty,
+                demand_confidence=message.demand_confidence,
+                demand_aoi=message.demand_aoi,
                 source_update_step=message.created_step,
                 current_step=self.current_step,
                 confidence_threshold=self.cfg.cognition_fusion_confidence_threshold,
@@ -415,11 +603,165 @@ class ResourceCognitionEnv:
             )
             accepted += int(result["accepted"])
             quality_gain += float(result["quality_gain"])
+            quality_gain_by_sender[message.sender_id] += float(result["quality_gain"])
+            accepted_by_sender[message.sender_id] += float(result["accepted"])
             self._received_message_cache[message.receiver_id][message.sender_id] = (
                 message,
                 bool(result["accepted"]),
             )
-        return {"accepted": float(accepted), "quality_gain": float(quality_gain)}
+        return {
+            "accepted": float(accepted),
+            "quality_gain": float(quality_gain),
+            "quality_gain_by_sender": quality_gain_by_sender,
+            "accepted_by_sender": accepted_by_sender,
+        }
+
+    def _per_agent_quality(self) -> np.ndarray:
+        _, beliefs = self._require_state()
+        return np.fromiter(
+            (beliefs.local_quality(i) for i in range(self.num_agents)),
+            dtype=np.float32,
+            count=self.num_agents,
+        )
+
+    def _execute_scheduling(
+        self,
+        schedule_agents: np.ndarray,
+        schedule_tasks: np.ndarray,
+    ) -> Dict[str, Any]:
+        assignments = np.full((self.num_agents,), -1, dtype=np.int64)
+        if self.cfg.cognition_enable_scheduling and schedule_tasks.size:
+            assignments[schedule_agents] = schedule_tasks
+
+        team_utility, service_by_agent, conflict_counts = self._evaluate_schedule(
+            assignments, use_truth=True
+        )
+        estimated_utility, _, _ = self._evaluate_schedule(
+            assignments, use_truth=False
+        )
+        difference_by_agent = np.zeros((self.num_agents,), dtype=np.float32)
+        for agent_id in np.flatnonzero(assignments >= 0):
+            counterfactual = assignments.copy()
+            counterfactual[agent_id] = -1
+            counterfactual_utility, _, _ = self._evaluate_schedule(
+                counterfactual, use_truth=True
+            )
+            difference_by_agent[agent_id] = max(
+                float(team_utility - counterfactual_utility), 0.0
+            )
+
+        energy_consumption_by_agent = np.zeros((self.num_agents,), dtype=np.float32)
+        for agent_id in np.flatnonzero(assignments >= 0):
+            consumed = min(
+                float(self.cfg.cognition_service_energy_cost),
+                float(self.remaining_time[agent_id]),
+            )
+            self.remaining_time[agent_id] = max(
+                self.remaining_time[agent_id] - consumed, 0.0
+            )
+            energy_consumption_by_agent[agent_id] = consumed
+
+        energy_penalty_by_agent = (
+            self.cfg.reward_weight_movement_cost
+            * energy_consumption_by_agent
+            / max(self.cfg.step_size(), 1e-6)
+        ).astype(np.float32)
+        conflict_penalty_by_agent = (
+            self.cfg.cognition_scheduling_conflict_penalty
+            * conflict_counts
+        ).astype(np.float32)
+        return {
+            "team_utility": float(team_utility),
+            "estimated_team_utility": float(estimated_utility),
+            "service_by_agent": service_by_agent,
+            "difference_by_agent": difference_by_agent,
+            "scheduled_task_by_agent": assignments,
+            "scheduled_count": int(np.count_nonzero(assignments >= 0)),
+            "conflict_counts": conflict_counts,
+            "conflict_count": int(np.sum(conflict_counts > 0.0)),
+            "conflict_penalty_by_agent": conflict_penalty_by_agent,
+            "conflict_penalty": float(np.mean(conflict_penalty_by_agent)),
+            "energy_consumption_by_agent": energy_consumption_by_agent,
+            "energy_consumption": float(np.sum(energy_consumption_by_agent)),
+            "energy_penalty_by_agent": energy_penalty_by_agent,
+            "energy_penalty": float(np.mean(energy_penalty_by_agent)),
+        }
+
+    def _evaluate_schedule(
+        self,
+        assignments: np.ndarray,
+        *,
+        use_truth: bool,
+    ) -> Tuple[float, np.ndarray, np.ndarray]:
+        truth, beliefs = self._require_state()
+        assignments = np.asarray(assignments, dtype=np.int64)
+        conflict_counts = np.zeros((self.num_agents,), dtype=np.float32)
+        assigned_agents = np.flatnonzero(assignments >= 0)
+        for left, agent_id in enumerate(assigned_agents):
+            task_id = int(assignments[agent_id])
+            for other_id in assigned_agents[left + 1:]:
+                other_task_id = int(assignments[other_id])
+                same_band = truth.band_ids[task_id] == truth.band_ids[other_task_id]
+                task_distance = float(
+                    np.linalg.norm(
+                        truth.positions_xy[task_id] - truth.positions_xy[other_task_id]
+                    )
+                )
+                if same_band and task_distance <= self.cfg.cognition_interference_radius:
+                    conflict_counts[agent_id] += 1.0
+                    conflict_counts[other_id] += 1.0
+
+        if use_truth:
+            demand = truth.demand_levels
+            availability = 1.0 - truth.true_states
+            weights = truth.priorities
+        else:
+            demand = beliefs.demand_estimates
+            availability = 1.0 - beliefs.estimates
+            weights = np.ones((len(truth),), dtype=np.float32)
+
+        service_by_agent = np.zeros((self.num_agents,), dtype=np.float32)
+        for agent_id in assigned_agents:
+            task_id = int(assignments[agent_id])
+            distance = float(
+                np.linalg.norm(
+                    self.uav_positions[agent_id, :2] - truth.positions_xy[task_id]
+                )
+            )
+            link_quality = float(
+                np.exp(-distance / max(self.cfg.sensing_radius, 1e-6))
+            )
+            energy_factor = float(
+                np.clip(
+                    self.remaining_time[agent_id]
+                    / max(self.cfg.uav_max_time, 1e-6),
+                    0.0,
+                    1.0,
+                )
+            )
+            conflict_factor = 1.0 / (1.0 + float(conflict_counts[agent_id]))
+            demand_value = (
+                demand[task_id]
+                if use_truth
+                else demand[agent_id, task_id]
+            )
+            availability_value = (
+                availability[task_id]
+                if use_truth
+                else availability[agent_id, task_id]
+            )
+            service_by_agent[agent_id] = float(
+                weights[task_id]
+                * np.clip(demand_value, 0.0, 1.0)
+                * np.clip(availability_value, 0.0, 1.0)
+                * link_quality
+                * energy_factor
+                * conflict_factor
+            )
+        utility = float(
+            np.sum(service_by_agent) / max(float(np.sum(weights)), 1e-6)
+        )
+        return utility, service_by_agent, conflict_counts
 
     def _init_uavs(self) -> None:
         if self.cfg.uav_init_mode == "circle":
@@ -500,8 +842,11 @@ class ResourceCognitionEnv:
 
     def _get_action_mask(self) -> np.ndarray:
         mask = np.ones((self.num_agents, self.action_size), dtype=np.float32)
+        sense_end = self.SENSE_ACTION_START + self.cfg.cognition_max_task_slots
         for i, visible in enumerate(self._slot_task_indices):
-            mask[i, self.MOVE_ACTIONS + len(visible):] = 0.0
+            mask[i, self.SENSE_ACTION_START + len(visible):sense_end] = 0.0
+            if self.cfg.cognition_enable_scheduling:
+                mask[i, self._schedule_action_start() + len(visible):] = 0.0
         return mask
 
     def _build_info(
@@ -530,7 +875,15 @@ class ResourceCognitionEnv:
             "mean_task_aoi": beliefs.mean_aoi(),
             "cognitive_quality": beliefs.mean_quality(),
             "per_agent_cognitive_quality": per_agent_quality,
-            "mean_estimation_error": beliefs.mean_estimation_error(truth.true_states),
+            "mean_estimation_error": beliefs.mean_estimation_error(
+                truth.true_states, truth.demand_levels
+            ),
+            "mean_spectrum_estimation_error": beliefs.mean_spectrum_estimation_error(
+                truth.true_states
+            ),
+            "mean_demand_estimation_error": beliefs.mean_demand_estimation_error(
+                truth.demand_levels
+            ),
             "move_distance_total_step": float(np.sum(move_distances)),
             "total_distance_per_uav": self.total_distance_per_uav.copy(),
             "remaining_time": self.remaining_time.copy(),
@@ -540,7 +893,7 @@ class ResourceCognitionEnv:
         }
 
     def _compute_local_obs_dim(self) -> int:
-        return int(6 + self.cfg.cognition_max_task_slots * 8 + self.cfg.max_obs_uavs * 8)
+        return int(6 + self.cfg.cognition_max_task_slots * 12 + self.cfg.max_obs_uavs * 12)
 
     def _require_state(self) -> Tuple[TaskTruthBatch, LocalBeliefBatch]:
         if self.task_truth is None or self.local_beliefs is None:

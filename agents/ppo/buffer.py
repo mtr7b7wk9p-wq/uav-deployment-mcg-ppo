@@ -26,7 +26,7 @@ class PPOBuffer:
     - local_obs_i
     - action_mask_i
     - action_i
-    - shared reward
+    - scalar shared reward or one reward per agent
     - done
     - value_i = critic(local_obs_i)
     """
@@ -73,12 +73,17 @@ class PPOBuffer:
         action_mask_batch: np.ndarray,   # [N, action_dim]
         action_batch: np.ndarray,        # [N]
         log_prob_batch: np.ndarray,      # [N]
-        reward: float,
+        reward: float | np.ndarray,
         done: bool,
         value_batch: np.ndarray,         # [N]
     ) -> None:
         num_agents = local_obs_batch.shape[0]
         done_f = 1.0 if done else 0.0
+        reward_array = np.asarray(reward, dtype=np.float32)
+        if reward_array.ndim == 0:
+            reward_array = np.full((num_agents,), float(reward_array), dtype=np.float32)
+        elif reward_array.shape != (num_agents,):
+            raise ValueError(f"reward must be scalar or have shape ({num_agents},).")
 
         for i in range(num_agents):
             self.add(
@@ -86,7 +91,7 @@ class PPOBuffer:
                 action_mask=action_mask_batch[i],
                 action=int(action_batch[i]),
                 log_prob=float(log_prob_batch[i]),
-                reward=float(reward),
+                reward=float(reward_array[i]),
                 done=done_f,
                 value=float(value_batch[i]),
             )

@@ -19,6 +19,8 @@ python runners/train_ppo_deployment.py --method-name ppo_resource_cognition
 ```
 python runners/train_ppo_deployment.py --method-name mcg_ppo_resource_cognition
 ```
+资源认知任务使用“区域-频段”单元，同时维护频谱占用和需求强度的局部认知；链路质量来自局部几何关系，真实任务优先级不进入局部观测。正式 `mcg_ppo_resource_cognition` 还启用逐 UAV 反事实贡献奖励。
+资源动作中，前 5 个为移动动作，随后是感知可见任务槽，最后是调度可见任务槽。调度奖励由需求满足、频谱可用性、链路质量、同频冲突和服务能耗共同决定。
 ### 6. maddpg
 ```
 python runners/train_ppo_deployment.py --method-name maddpg

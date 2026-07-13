@@ -11,10 +11,10 @@
 The local observation has three blocks:
 
 1. Self state: 6 values.
-2. Visible task slots: `cognition_max_task_slots x 8` values.
-3. Received neighbor-message slots: `max_obs_uavs x 8` values.
+2. Visible task slots: `cognition_max_task_slots x 12` values.
+3. Received neighbor-message slots: `max_obs_uavs x 12` values.
 
-Message slots contain only delivered communication summaries: sender identity, task identity, estimate, uncertainty, confidence, message age, fusion acceptance, and a valid marker. Nearby UAV ground truth is not used as a substitute for communication.
+Task slots contain local geometry, band identity, spectrum belief, demand belief, and local link quality. Message slots contain only delivered communication summaries for both spectrum and demand: sender identity, task identity, estimates, uncertainties, confidences, ages, fusion acceptance, and a valid marker. Nearby UAV ground truth is not used as a substitute for communication.
 
 ## Network Architecture
 
@@ -26,9 +26,9 @@ Message slots contain only delivered communication summaries: sender identity, t
 
 The three contexts are fused into one latent vector for the actor or critic. Actor and critic retain separate encoders, matching the existing PPO architecture. No external graph-learning dependency is added.
 
-## Fair Comparison
+## Encoder Comparison Boundary
 
-Both methods use the same environment, local observations, action masks, reward, communication, rollout protocol, and PPO hyperparameters. The baseline uses a flat MLP; the formal MCG method changes only the observation encoder.
+The encoder implementation initially kept reward and rollout behavior identical. The formal method now also enables the separately specified per-UAV difference reward. A later encoder-only ablation is required when reporting the isolated contribution of the structured encoder.
 
 ## Validation
 

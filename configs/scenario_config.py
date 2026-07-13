@@ -112,11 +112,14 @@ class ScenarioConfig:
     # Independent resource-cognition environment.
     use_resource_cognition: bool = False
     num_cognition_tasks: int = 20
-    cognition_num_bands: int = 1
+    cognition_num_bands: int = 3
     cognition_max_task_slots: int = 8
     cognition_observation_noise_std: float = 0.05
     cognition_aoi_increment: float = 1.0
     cognition_task_uncertainty_reduction: float = 0.45
+    cognition_demand_uncertainty_reduction: float = 0.35
+    cognition_spectrum_quality_weight: float = 0.60
+    cognition_demand_quality_weight: float = 0.40
     cognition_sensing_cost: float = 0.05
     cognition_repeat_penalty: float = 1.0
     cognition_enable_communication: bool = True
@@ -129,6 +132,13 @@ class ScenarioConfig:
     cognition_fusion_confidence_threshold: float = 0.05
     cognition_freshness_decay: float = 0.10
     cognition_fusion_reward_weight: float = 2.0
+    cognition_use_per_agent_rewards: bool = False
+    cognition_difference_reward_weight: float = 10.0
+    cognition_enable_scheduling: bool = True
+    cognition_interference_radius: float = 500.0
+    cognition_service_energy_cost: float = 5.0
+    cognition_scheduling_reward_weight: float = 4.0
+    cognition_scheduling_conflict_penalty: float = 1.0
 
     # =========================
     # Reward（ppo_main 基线原始 reward）
@@ -237,6 +247,18 @@ class ScenarioConfig:
         self.cognition_task_uncertainty_reduction = float(
             min(max(self.cognition_task_uncertainty_reduction, 0.0), 1.0)
         )
+        self.cognition_demand_uncertainty_reduction = float(
+            min(max(self.cognition_demand_uncertainty_reduction, 0.0), 1.0)
+        )
+        self.cognition_spectrum_quality_weight = float(
+            max(self.cognition_spectrum_quality_weight, 0.0)
+        )
+        self.cognition_demand_quality_weight = float(
+            max(self.cognition_demand_quality_weight, 0.0)
+        )
+        if self.cognition_spectrum_quality_weight + self.cognition_demand_quality_weight <= 0.0:
+            self.cognition_spectrum_quality_weight = 0.6
+            self.cognition_demand_quality_weight = 0.4
         self.cognition_sensing_cost = float(max(self.cognition_sensing_cost, 0.0))
         self.cognition_repeat_penalty = float(max(self.cognition_repeat_penalty, 0.0))
         self.cognition_communication_radius = float(max(self.cognition_communication_radius, 1.0))
@@ -250,6 +272,17 @@ class ScenarioConfig:
         )
         self.cognition_freshness_decay = float(max(self.cognition_freshness_decay, 0.0))
         self.cognition_fusion_reward_weight = float(max(self.cognition_fusion_reward_weight, 0.0))
+        self.cognition_difference_reward_weight = float(
+            max(self.cognition_difference_reward_weight, 0.0)
+        )
+        self.cognition_interference_radius = float(max(self.cognition_interference_radius, 1.0))
+        self.cognition_service_energy_cost = float(max(self.cognition_service_energy_cost, 0.0))
+        self.cognition_scheduling_reward_weight = float(
+            max(self.cognition_scheduling_reward_weight, 0.0)
+        )
+        self.cognition_scheduling_conflict_penalty = float(
+            max(self.cognition_scheduling_conflict_penalty, 0.0)
+        )
         self.reward_weight_uncertainty_gain = float(max(self.reward_weight_uncertainty_gain, 0.0))
         self.reward_weight_aoi_gain = float(max(self.reward_weight_aoi_gain, 0.0))
         self.reward_weight_repeat_sensing_penalty = float(max(self.reward_weight_repeat_sensing_penalty, 0.0))
@@ -301,11 +334,12 @@ class ScenarioConfig:
         return self.get_ppo_main_local_obs_dim()
 
     def get_resource_cognition_local_obs_dim(self) -> int:
-        return int(6 + self.cognition_max_task_slots * 8 + self.max_obs_uavs * 8)
+        return int(6 + self.cognition_max_task_slots * 12 + self.max_obs_uavs * 12)
 
     def get_resource_cognition_action_dim(self) -> int:
-        """Movement actions plus one explicit sensing action per local slot."""
-        return int(5 + self.cognition_max_task_slots)
+        """Movement, sensing, and optional scheduling actions per local slot."""
+        action_groups = 2 if bool(self.cognition_enable_scheduling) else 1
+        return int(5 + action_groups * self.cognition_max_task_slots)
 
     def validate(self) -> None:
         if self.r_safe <= 0 or self.r_disaster <= self.r_safe:
