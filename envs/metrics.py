@@ -63,6 +63,12 @@ class EpisodeMetrics:
     high_priority_service_rate: List[float] = field(default_factory=list)
     queue_overflow: List[float] = field(default_factory=list)
     service_energy_consumption: List[float] = field(default_factory=list)
+    path_loss_db: List[float] = field(default_factory=list)
+    sinr: List[float] = field(default_factory=list)
+    service_capacity: List[float] = field(default_factory=list)
+    service_outage_count: List[int] = field(default_factory=list)
+    service_outage_rate: List[float] = field(default_factory=list)
+    interference_power: List[float] = field(default_factory=list)
     reward_component_history: Dict[str, List[float]] = field(default_factory=dict)
 
     final_total_distance_per_uav: Optional[np.ndarray] = None
@@ -81,6 +87,12 @@ class EpisodeMetrics:
     final_service_rate: float = 0.0
     final_weighted_demand_satisfaction: float = 0.0
     final_high_priority_service_rate: float = 0.0
+    final_path_loss_db: float = 0.0
+    final_sinr: float = 0.0
+    final_service_capacity: float = 0.0
+    final_service_outage_count: int = 0
+    final_service_outage_rate: float = 0.0
+    final_interference_power: float = 0.0
     episode_length: int = 0
     done_reason: str = "unknown"
 
@@ -133,6 +145,14 @@ class EpisodeMetrics:
         self.service_energy_consumption.append(
             float(info.get("service_energy_consumption", 0.0))
         )
+        self.path_loss_db.append(float(info.get("mean_path_loss_db", 0.0)))
+        self.sinr.append(float(info.get("mean_sinr", 0.0)))
+        self.service_capacity.append(float(info.get("mean_service_capacity", 0.0)))
+        self.service_outage_count.append(int(info.get("service_outage_count", 0)))
+        self.service_outage_rate.append(float(info.get("service_outage_rate", 0.0)))
+        self.interference_power.append(
+            float(info.get("total_interference_power_w", 0.0))
+        )
 
         for key, value in info.items():
             if _should_collect_reward_key(key, value):
@@ -172,6 +192,22 @@ class EpisodeMetrics:
         )
         self.final_high_priority_service_rate = float(
             info.get("high_priority_service_rate", self.final_high_priority_service_rate)
+        )
+        self.final_path_loss_db = float(
+            info.get("mean_path_loss_db", self.final_path_loss_db)
+        )
+        self.final_sinr = float(info.get("mean_sinr", self.final_sinr))
+        self.final_service_capacity = float(
+            info.get("mean_service_capacity", self.final_service_capacity)
+        )
+        self.final_service_outage_count = int(
+            info.get("service_outage_count", self.final_service_outage_count)
+        )
+        self.final_service_outage_rate = float(
+            info.get("service_outage_rate", self.final_service_outage_rate)
+        )
+        self.final_interference_power = float(
+            info.get("total_interference_power_w", self.final_interference_power)
         )
         self.episode_length = int(info.get("step", len(self.rewards)))
         self.done_reason = str(info.get("termination_reason", self.done_reason))
@@ -241,6 +277,15 @@ class EpisodeMetrics:
             "total_service_energy_consumption": float(
                 np.sum(self.service_energy_consumption)
             ),
+            "mean_path_loss_db": self.final_path_loss_db,
+            "mean_sinr": self.final_sinr,
+            "mean_service_capacity": self.final_service_capacity,
+            "total_service_outages": int(np.sum(self.service_outage_count)),
+            "service_outage_rate": (
+                float(np.mean(self.service_outage_rate))
+                if self.service_outage_rate else 0.0
+            ),
+            "total_interference_power_w": float(np.sum(self.interference_power)),
             "mean_scheduling_team_utility": float(
                 np.mean(self.scheduling_team_utility)
             ) if self.scheduling_team_utility else 0.0,
@@ -333,6 +378,12 @@ class MetricTracker:
                 "mean_high_priority_service_rate": 0.0,
                 "mean_total_queue_overflow": 0.0,
                 "mean_total_service_energy_consumption": 0.0,
+                "mean_path_loss_db": 0.0,
+                "mean_sinr": 0.0,
+                "mean_service_capacity": 0.0,
+                "mean_total_service_outages": 0.0,
+                "mean_service_outage_rate": 0.0,
+                "mean_total_interference_power_w": 0.0,
                 "mean_total_messages_attempted": 0.0,
                 "mean_total_messages_dropped": 0.0,
                 "mean_total_messages_delivered": 0.0,
@@ -415,6 +466,30 @@ class MetricTracker:
             [x.get("total_service_energy_consumption", 0.0) for x in self.episode_summaries],
             dtype=np.float32,
         )
+        final_path_loss_db = np.array(
+            [x.get("mean_path_loss_db", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
+        final_sinr = np.array(
+            [x.get("mean_sinr", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
+        final_service_capacity = np.array(
+            [x.get("mean_service_capacity", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
+        total_service_outages = np.array(
+            [x.get("total_service_outages", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
+        service_outage_rates = np.array(
+            [x.get("service_outage_rate", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
+        total_interference_power = np.array(
+            [x.get("total_interference_power_w", 0.0) for x in self.episode_summaries],
+            dtype=np.float32,
+        )
         total_messages_attempted = np.array([x.get("total_messages_attempted", 0.0) for x in self.episode_summaries], dtype=np.float32)
         total_messages_dropped = np.array([x.get("total_messages_dropped", 0.0) for x in self.episode_summaries], dtype=np.float32)
         total_messages_delivered = np.array([x.get("total_messages_delivered", 0.0) for x in self.episode_summaries], dtype=np.float32)
@@ -487,6 +562,14 @@ class MetricTracker:
             "mean_total_queue_overflow": float(np.mean(total_queue_overflow)),
             "mean_total_service_energy_consumption": float(
                 np.mean(total_service_energy_consumption)
+            ),
+            "mean_path_loss_db": float(np.mean(final_path_loss_db)),
+            "mean_sinr": float(np.mean(final_sinr)),
+            "mean_service_capacity": float(np.mean(final_service_capacity)),
+            "mean_total_service_outages": float(np.mean(total_service_outages)),
+            "mean_service_outage_rate": float(np.mean(service_outage_rates)),
+            "mean_total_interference_power_w": float(
+                np.mean(total_interference_power)
             ),
             "mean_total_messages_attempted": float(np.mean(total_messages_attempted)),
             "mean_total_messages_dropped": float(np.mean(total_messages_dropped)),
